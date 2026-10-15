@@ -27,7 +27,9 @@ Versiones: Java 21, Spring Boot 4.1.1 (incluye Spring Kafka 4.1.1), Apache Kafka
 
 - **Java 21**: verifica con `java -version`.
 - **Docker Desktop** abierto.
-- **IntelliJ IDEA** (ya trae Maven) o Maven 3.9+ instalado.
+- **Maven no hace falta instalarlo**: el proyecto trae el Maven Wrapper (`mvnw`), que descarga la versión correcta la primera vez.
+
+En PowerShell los comandos son `.\mvnw.cmd ...`; en Git Bash, macOS o Linux, `./mvnw ...`.
 
 ## Cómo correrlo
 
@@ -42,7 +44,7 @@ Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` debe 
 **2. Compila todo y corre las pruebas:**
 
 ```bash
-mvn clean install
+./mvnw clean install
 ```
 
 Debe terminar con `BUILD SUCCESS` y 18 pruebas pasadas (4 de order-service y 14 del libro de órdenes).
@@ -50,13 +52,13 @@ Debe terminar con `BUILD SUCCESS` y 18 pruebas pasadas (4 de order-service y 14 
 **3. Arranca el motor** (terminal 1):
 
 ```bash
-mvn -pl matching-engine spring-boot:run
+./mvnw -pl matching-engine spring-boot:run
 ```
 
 **4. Arranca order-service** (terminal 2):
 
 ```bash
-mvn -pl order-service spring-boot:run
+./mvnw -pl order-service spring-boot:run
 ```
 
 En IntelliJ también puedes dar clic en el ▶ junto a `main` en `MatchingEngineApplication` y en `OrderServiceApplication`.
@@ -98,7 +100,8 @@ El número de partición puede ser otro; lo importante es lo que muestran los ex
 | --- | --- | --- |
 | `Connection to node -1 (localhost:9092) could not be established` | Kafka no está arriba | `docker compose ps`; espera a *healthy* |
 | `Port 9092 is already in use` | Otro Kafka corriendo | Detén el otro o cambia el puerto en `docker-compose.yml` y en los `application.yml` |
-| `Could not find artifact co.bolsasim:eventos` | Corriste un servicio sin compilar antes | Ejecuta `mvn clean install` en la raíz |
+| `Could not find artifact co.bolsasim:eventos` | Corriste un servicio sin compilar antes | Ejecuta `./mvnw clean install` en la raíz |
+| `Failed to install artifact co.bolsasim:eventos` | Un servicio corriendo tiene el jar bloqueado (Windows) | Detén los servicios y vuelve a compilar |
 | `release version 21 not supported` | Maven usa otro Java | Configura Java 21 en IntelliJ (*File → Project Structure → SDK*) |
 
 ## El libro de órdenes
@@ -120,6 +123,19 @@ Pruébalo con los dos servicios corriendo:
 En el log de matching-engine verás `Ejecución: 100 acciones de ANDX a 5000 COP ...` y después `Libro ANDX | mejor compra 5100 | mejor venta -`: las 50 acciones que faltaron quedaron esperando.
 
 Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
+
+## Prueba de integración
+
+Comprueba todo el camino de una vez: levanta Kafka, arranca los dos servicios, envía una venta y una compra que se cruzan y revisa que el motor registre la ejecución. Detén tus servicios antes (usa el puerto 8081) y ten Docker abierto:
+
+```bash
+./mvnw -B verify
+bash scripts/prueba-integracion.sh
+```
+
+Debe terminar con `OK: la orden viajó por Kafka y el motor la ejecutó`. Los logs quedan en `target/integracion/`.
+
+GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba de integración en cada push y pull request a `main`.
 
 ## Siguiente paso
 
