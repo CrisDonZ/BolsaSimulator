@@ -1,13 +1,16 @@
 # BolsaSim — proyecto inicial
 
-Primer paso del simulador de bolsa: **order-service** recibe una orden por REST y la publica en Kafka; **matching-engine** la lee y la cruza en el libro de órdenes de su símbolo. Por ahora las ejecuciones solo se muestran en el log.
+Simulador de bolsa: **auth-service** registra a los usuarios; **order-service** recibe sus órdenes por REST y las publica en Kafka; **matching-engine** las lee y las cruza en el libro de órdenes de su símbolo. Por ahora las ejecuciones solo se muestran en el log.
 
 Piensa en Kafka como un buzón con 6 casilleros (particiones). order-service deja cada orden en el casillero de su símbolo y el motor las recoge en el mismo orden en que llegaron.
 
 ```
-Postman / curl ──POST──▶ order-service ──▶ Kafka: orders.commands ──▶ matching-engine
-                         (puerto 8081)      (6 particiones,            (log: "Orden recibida")
-                                             clave = símbolo)
+Postman / curl ──POST /api/usuarios──▶ auth-service ──▶ PostgreSQL (base "auth")
+               │                       (puerto 8082)
+               │  usuarioId = id del usuario registrado
+               └─POST /api/ordenes───▶ order-service ──▶ Kafka: orders.commands ──▶ matching-engine
+                                       (puerto 8081)      (6 particiones,            (log: "Orden recibida")
+                                                           clave = símbolo)
 ```
 
 ## Estructura
@@ -17,11 +20,13 @@ Postman / curl ──POST──▶ order-service ──▶ Kafka: orders.command
 | `eventos/` | Java puro, sin Spring: el evento `ComandoOrden`, los enums y los nombres de tópicos. Lo comparten todos los servicios. |
 | `order-service/` | API REST `POST /api/ordenes`, validaciones y el publicador de Kafka. Incluye pruebas unitarias. |
 | `matching-engine/` | El consumidor de Kafka y el libro de órdenes (`libro/`, Java puro con pruebas JUnit). |
-| `docker-compose.yml` | Kafka (modo KRaft), creación de tópicos y Kafka UI. |
+| `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. |
+| `docker-compose.yml` | Kafka (modo KRaft), creación de tópicos, Kafka UI y PostgreSQL. |
+| `postgres/init.sql` | Crea una base por servicio la primera vez que arranca PostgreSQL. |
 | `peticiones.http` | Órdenes de ejemplo listas para enviar desde IntelliJ o la extensión REST Client de VS Code. |
 | `enviar-ordenes.ps1` | Envía varias órdenes de una vez desde PowerShell (ver el libro de órdenes abajo). |
 
-Versiones: Java 21, Spring Boot 4.1.1 (incluye Spring Kafka 4.1.1), Apache Kafka 4.2.1.
+Versiones: Java 21, Spring Boot 4.1.1 (incluye Spring Kafka 4.1.1), Apache Kafka 4.2.1, PostgreSQL 17.
 
 ## Requisitos
 
@@ -33,13 +38,13 @@ En PowerShell los comandos son `.\mvnw.cmd ...`; en Git Bash, macOS o Linux, `./
 
 ## Cómo correrlo
 
-**1. Levanta Kafka** (en la carpeta del proyecto):
+**1. Levanta Kafka y PostgreSQL** (en la carpeta del proyecto):
 
 ```bash
 docker compose up -d
 ```
 
-Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` debe decir *healthy*. Abre http://localhost:8090 para ver Kafka UI; en *Topics* debe aparecer `orders.commands` con 6 particiones.
+Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bolsasim-postgres` deben decir *healthy*. Abre http://localhost:8090 para ver Kafka UI; en *Topics* debe aparecer `orders.commands` con 6 particiones.
 
 **2. Compila todo y corre las pruebas:**
 
@@ -47,7 +52,7 @@ Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` debe 
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 18 pruebas pasadas (4 de order-service y 14 del libro de órdenes).
+Debe terminar con `BUILD SUCCESS` y 33 pruebas pasadas: 4 de order-service, 14 del libro de órdenes y 15 de auth-service. Las 3 de integración de auth-service usan Docker (Testcontainers); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -61,9 +66,24 @@ Debe terminar con `BUILD SUCCESS` y 18 pruebas pasadas (4 de order-service y 14 
 ./mvnw -pl order-service spring-boot:run
 ```
 
-En IntelliJ también puedes dar clic en el ▶ junto a `main` en `MatchingEngineApplication` y en `OrderServiceApplication`.
+**5. Arranca auth-service** (terminal 3):
 
-**5. Envía una orden.** La forma más fácil es abrir `peticiones.http` en IntelliJ y presionar ▶. O desde la terminal:
+```bash
+./mvnw -pl auth-service spring-boot:run
+```
+
+En IntelliJ también puedes dar clic en el ▶ junto a `main` en `MatchingEngineApplication`, `OrderServiceApplication` y `AuthServiceApplication`.
+
+**6. Registra un usuario.** Guarda el `id` de la respuesta: es el `usuarioId` de sus órdenes.
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/usuarios -ContentType "application/json" `
+  -Body '{"nombre":"Cris","alias":"cris","correo":"cris@correo.com","contrasena":"secreta123","aceptaPoliticaDatos":true}'
+```
+
+Responde `201 Created` con el usuario (sin la contraseña). Si el correo ya existe: `409 Conflict` con "Ese correo ya tiene una cuenta.".
+
+**7. Envía una orden.** La forma más fácil es abrir `peticiones.http` en IntelliJ y presionar ▶. O desde la terminal (cambia `cris` por el `id` de tu usuario):
 
 Git Bash, macOS o Linux:
 
@@ -103,6 +123,7 @@ El número de partición puede ser otro; lo importante es lo que muestran los ex
 | `Could not find artifact co.bolsasim:eventos` | Corriste un servicio sin compilar antes | Ejecuta `./mvnw clean install` en la raíz |
 | `Failed to install artifact co.bolsasim:eventos` | Un servicio corriendo tiene el jar bloqueado (Windows) | Detén los servicios y vuelve a compilar |
 | `release version 21 not supported` | Maven usa otro Java | Configura Java 21 en IntelliJ (*File → Project Structure → SDK*) |
+| auth-service: `Connection to localhost:5433 refused` | PostgreSQL no está arriba | `docker compose up -d postgres` y espera a *healthy* |
 
 ## El libro de órdenes
 
@@ -126,17 +147,19 @@ Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
 
 ## Prueba de integración
 
-Comprueba todo el camino de una vez: levanta Kafka, arranca los dos servicios, envía una venta y una compra que se cruzan y revisa que el motor registre la ejecución. Detén tus servicios antes (usa el puerto 8081) y ten Docker abierto:
+Comprueba todo el camino de una vez: levanta Kafka y PostgreSQL, arranca los tres servicios, registra un usuario, envía con su id una venta y una compra que se cruzan y revisa que el motor registre la ejecución a nombre de ese usuario. Detén tus servicios antes (usa los puertos 8081 y 8082) y ten Docker abierto:
 
 ```bash
 ./mvnw -B verify
 bash scripts/prueba-integracion.sh
 ```
 
-Debe terminar con `OK: la orden viajó por Kafka y el motor la ejecutó`. Los logs quedan en `target/integracion/`.
+Debe terminar con `OK: el usuario se registró, sus órdenes viajaron por Kafka y el motor las ejecutó`. Los logs quedan en `target/integracion/`.
 
 GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba de integración en cada push y pull request a `main`.
 
-## Siguiente paso
+## Siguientes pasos
 
-Publicar las ejecuciones en un tópico de Kafka (por ejemplo `trades`) para que otros servicios, como el portafolio de cada usuario, se enteren de las compras y ventas.
+- **Órdenes solo de usuarios registrados:** auth-service publica `users.registered` y order-service rechaza órdenes de un `usuarioId` que no existe. Hoy order-service acepta cualquier texto.
+- **Login (HU-02):** token JWT; el `usuarioId` saldrá del token y no del cuerpo de la orden.
+- **Ejecuciones en Kafka:** publicarlas en `trades.executed` para que el portafolio de cada usuario se entere de sus compras y ventas.

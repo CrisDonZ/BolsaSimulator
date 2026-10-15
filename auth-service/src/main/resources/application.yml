@@ -1,0 +1,18 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: auth-service
+  datasource:
+    # Base "auth" del PostgreSQL de docker-compose.yml (puerto 5433 en tu computador).
+    # Los valores por defecto sirven solo en desarrollo; en otro entorno van en variables de entorno.
+    url: ${AUTH_DB_URL:jdbc:postgresql://localhost:5433/auth}
+    username: ${AUTH_DB_USUARIO:bolsasim}
+    password: ${AUTH_DB_CLAVE:bolsasim}
+  jpa:
+    # Las tablas las crea Flyway; Hibernate solo comprueba que coincidan con las entidades
+    hibernate:
+      ddl-auto: validate
+    # Cada petición abre y cierra su propia conexión, sin consultas escondidas en la vista
+    open-in-view: false
