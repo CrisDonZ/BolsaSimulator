@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prueba de punta a punta: levanta Kafka y PostgreSQL, arranca auth-service, order-service y
-# matching-engine, registra un usuario, envía con su id una venta y una compra que se cruzan
-# y comprueba que el motor registra la ejecución a nombre de ese usuario.
+# matching-engine, registra un usuario (y comprueba que llega a users.registered), envía con su id
+# una venta y una compra que se cruzan y comprueba que el motor registra la ejecución a su nombre.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
 # (la prueba arranca los suyos en los puertos 8081 y 8082).
@@ -63,6 +63,16 @@ USUARIO=$(curl -sf -X POST http://localhost:8082/api/usuarios -H "Content-Type: 
 ID=$(echo "$USUARIO" | sed -E 's/.*"id":"([^"]+)".*/\1/')
 curl -sf -o /dev/null "http://localhost:8082/api/usuarios/$ID"
 echo "   Usuario $ID"
+
+# MSYS_NO_PATHCONV: en Git Bash de Windows evita que /opt/... se convierta en una ruta de Windows
+if ! MSYS_NO_PATHCONV=1 docker exec bolsasim-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+        --bootstrap-server localhost:9092 --topic users.registered --from-beginning --timeout-ms 10000 \
+        2> /dev/null | grep -q "$ID"; then
+    echo "El evento del usuario $ID no llegó a users.registered:"
+    cat "$LOGS/auth-service.log"
+    exit 1
+fi
+echo "   Evento UsuarioRegistrado publicado en users.registered"
 
 echo "4. Enviando con su id una venta y una compra de TEST a 5000..."
 enviar_orden "{\"usuarioId\":\"$ID\",\"simbolo\":\"TEST\",\"lado\":\"VENTA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":10}"

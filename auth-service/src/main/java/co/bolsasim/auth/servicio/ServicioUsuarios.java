@@ -3,6 +3,7 @@ package co.bolsasim.auth.servicio;
 import co.bolsasim.auth.usuario.RepositorioUsuarios;
 import co.bolsasim.auth.usuario.Usuario;
 import co.bolsasim.auth.web.RegistroUsuarioRequest;
+import co.bolsasim.eventos.UsuarioRegistrado;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.UUID;
@@ -12,20 +13,21 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Reglas del registro (HU-01): correo y alias únicos, y la contraseña se guarda cifrada.
- *
- * <p>Siguiente paso: publicar {@code users.registered} para que portfolio-service cree
- * la cuenta con el saldo inicial (RF-07), y que order-service rechace órdenes de usuarios
- * que no existen.
+ * Al registrar publica {@code users.registered} para que portfolio-service cree la cuenta
+ * con el saldo inicial (RF-07).
  */
 @Service
 public class ServicioUsuarios {
 
     private final RepositorioUsuarios repositorio;
     private final PasswordEncoder cifrador;
+    private final PublicadorUsuarios publicador;
 
-    public ServicioUsuarios(RepositorioUsuarios repositorio, PasswordEncoder cifrador) {
+    public ServicioUsuarios(RepositorioUsuarios repositorio, PasswordEncoder cifrador,
+                            PublicadorUsuarios publicador) {
         this.repositorio = repositorio;
         this.cifrador = cifrador;
+        this.publicador = publicador;
     }
 
     @Transactional
@@ -45,8 +47,12 @@ public class ServicioUsuarios {
                 request.nombre().trim(), alias, correo, cifrador.encode(request.contrasena()), Instant.now());
 
         // saveAndFlush: si dos registros iguales llegan a la vez, la restricción UNIQUE de la base
-        // falla aquí mismo y el ManejadorErrores responde 409
-        return repositorio.saveAndFlush(usuario);
+        // falla aquí mismo y el ManejadorErrores responde 409, sin llegar a publicar el evento
+        Usuario guardado = repositorio.saveAndFlush(usuario);
+
+        publicador.publicar(UsuarioRegistrado.de(
+                guardado.getId(), guardado.getAlias(), guardado.getRol().name(), guardado.getCreadoEn()));
+        return guardado;
     }
 
     @Transactional(readOnly = true)

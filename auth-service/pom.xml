@@ -15,6 +15,11 @@
     <description>Registro de usuarios; luego también inicio de sesión y tokens JWT</description>
 
     <dependencies>
+        <dependency>
+            <groupId>co.bolsasim</groupId>
+            <artifactId>eventos</artifactId>
+        </dependency>
+
         <!-- API REST con Spring MVC (incluye Tomcat y Jackson) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -48,6 +53,12 @@
             <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
 
+        <!-- Productor de Kafka (KafkaTemplate) para publicar users.registered -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
+        </dependency>
+
         <!-- Solo BCrypt para cifrar contraseñas. El resto de Spring Security (login, JWT) llega con HU-02. -->
         <dependency>
             <groupId>org.springframework.security</groupId>
@@ -72,7 +83,7 @@
             <artifactId>spring-boot-starter-data-jpa-test</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- PostgreSQL real en un contenedor durante las pruebas (RNF-36) -->
+        <!-- PostgreSQL y Kafka reales en contenedores durante las pruebas (RNF-36) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-testcontainers</artifactId>
@@ -81,6 +92,11 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-kafka</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
