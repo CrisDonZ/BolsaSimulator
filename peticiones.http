@@ -62,3 +62,27 @@ Content-Type: application/json
   "precioLimite": 5000,
   "cantidad": 0
 }
+
+### 6. Registrar un usuario (auth-service, puerto 8082). Usa el "id" de la respuesta como usuarioId de tus órdenes.
+POST http://localhost:8082/api/usuarios
+Content-Type: application/json
+
+{
+  "nombre": "Cris",
+  "alias": "cris",
+  "correo": "cris@correo.com",
+  "contrasena": "secreta123",
+  "aceptaPoliticaDatos": true
+}
+
+### 7. Error a propósito: sin aceptar la política de datos y con contraseña corta -> 400 Bad Request
+POST http://localhost:8082/api/usuarios
+Content-Type: application/json
+
+{
+  "nombre": "Cris",
+  "alias": "cris",
+  "correo": "cris@correo.com",
+  "contrasena": "corta",
+  "aceptaPoliticaDatos": false
+}

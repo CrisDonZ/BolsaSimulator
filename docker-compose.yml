@@ -1,6 +1,6 @@
 # Infraestructura local de BolsaSim.
-#   docker compose up -d     -> levanta Kafka, crea los tópicos y abre Kafka UI
-#   docker compose down      -> lo apaga (los mensajes se borran)
+#   docker compose up -d     -> levanta Kafka, crea los tópicos, abre Kafka UI y levanta PostgreSQL
+#   docker compose down      -> lo apaga (los mensajes y los datos se borran)
 services:
 
   # Kafka en modo KRaft: un solo nodo que hace de broker y de controlador, sin ZooKeeper.
@@ -68,3 +68,24 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: bolsasim
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
+
+  # PostgreSQL con una base por servicio (ver postgres/init.sql). Puerto 5433 en tu computador
+  # para no chocar con otro PostgreSQL que ya use el 5432.
+  postgres:
+    image: postgres:17-alpine
+    container_name: bolsasim-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      # Solo para desarrollo local. En otro entorno van en variables de entorno (RNF-26).
+      POSTGRES_USER: bolsasim
+      POSTGRES_PASSWORD: bolsasim
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      # Por TCP (-h 127.0.0.1): mientras corre init.sql, PostgreSQL solo atiende por socket interno,
+      # así no se reporta listo antes de que exista la base "auth"
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U bolsasim -d auth"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
