@@ -58,7 +58,7 @@ services:
 
   # Interfaz web para ver tópicos, particiones y mensajes: http://localhost:8090
   kafka-ui:
-    image: ghcr.io/kafbat/kafka-ui:latest
+    image: ghcr.io/kafbat/kafka-ui:v1.5.0
     container_name: bolsasim-kafka-ui
     depends_on:
       kafka:

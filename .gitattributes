@@ -1,0 +1,4 @@
+# mvnw corre en Linux (GitHub Actions) y en Git Bash: con saltos de línea de Windows (CRLF) deja de funcionar.
+mvnw text eol=lf
+*.sh text eol=lf
+*.cmd text eol=crlf

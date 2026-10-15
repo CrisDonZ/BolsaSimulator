@@ -1,5 +1,5 @@
-# Compila todo y corre las pruebas en cada push y pull request a main.
-# Si algo no compila o una prueba falla, GitHub lo marca en rojo.
+# Compila todo, corre las pruebas y hace una prueba de punta a punta con Kafka
+# en cada push y pull request a main. Si algo falla, GitHub lo marca en rojo.
 name: Build
 
 on:
@@ -21,6 +21,15 @@ jobs:
           java-version: '21'
           cache: maven
 
-      # verify = compilar + pruebas + empaquetar, igual que mvn clean install pero sin copiar a ~/.m2
+      # verify = compilar + pruebas + empaquetar, igual que mvn clean install pero sin copiar a ~/.m2.
+      # Se usa el wrapper para compilar con la misma versión de Maven que en tu máquina.
       - name: Compilar y probar
-        run: mvn -B verify
+        run: ./mvnw -B verify
+
+      # Levanta Kafka con docker-compose.yml, arranca los dos servicios y cruza una orden
+      - name: Prueba de integración
+        run: bash scripts/prueba-integracion.sh
+
+      - name: Logs de los servicios
+        if: failure()
+        run: tail -n 100 target/integracion/*.log || true
