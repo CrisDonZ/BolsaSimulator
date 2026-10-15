@@ -2,7 +2,9 @@ package co.bolsasim.order.servicio;
 
 import co.bolsasim.eventos.ComandoOrden;
 import co.bolsasim.eventos.TipoOrden;
+import co.bolsasim.order.usuario.RepositorioUsuarios;
 import co.bolsasim.order.web.CrearOrdenRequest;
+import java.util.UUID;
 import org.springframework.stereotype.Service;
 
 /**
@@ -13,13 +15,16 @@ import org.springframework.stereotype.Service;
 public class ServicioOrdenes {
 
     private final PublicadorOrdenes publicador;
+    private final RepositorioUsuarios usuarios;
 
-    public ServicioOrdenes(PublicadorOrdenes publicador) {
+    public ServicioOrdenes(PublicadorOrdenes publicador, RepositorioUsuarios usuarios) {
         this.publicador = publicador;
+        this.usuarios = usuarios;
     }
 
     public ComandoOrden crear(CrearOrdenRequest request) {
         validarPrecio(request);
+        validarUsuario(request.usuarioId());
 
         ComandoOrden comando = ComandoOrden.nueva(
                 request.usuarioId(),
@@ -31,6 +36,22 @@ public class ServicioOrdenes {
 
         publicador.publicar(comando);
         return comando;
+    }
+
+    /**
+     * El usuario debe estar en la copia local que llena users.registered. Un id que ni siquiera
+     * es un UUID (por ejemplo "cris") tampoco puede ser un usuario registrado.
+     */
+    private void validarUsuario(String usuarioId) {
+        UUID id;
+        try {
+            id = UUID.fromString(usuarioId);
+        } catch (IllegalArgumentException e) {
+            throw new UsuarioNoRegistradoException(usuarioId);
+        }
+        if (!usuarios.existsById(id)) {
+            throw new UsuarioNoRegistradoException(usuarioId);
+        }
     }
 
     // Próximos pasos (ver requisitos RF-16 y RF-17): validar tick, banda de ±10 %,

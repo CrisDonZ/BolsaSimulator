@@ -1,6 +1,7 @@
 package co.bolsasim.order.web;
 
 import co.bolsasim.order.servicio.OrdenInvalidaException;
+import co.bolsasim.order.servicio.UsuarioNoRegistradoException;
 import java.util.stream.Collectors;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -19,6 +20,17 @@ public class ManejadorErrores {
     public ProblemDetail ordenInvalida(OrdenInvalidaException e) {
         ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, e.getMessage());
         problema.setTitle("Orden inválida");
+        return problema;
+    }
+
+    /**
+     * 422 y no 404: la URL existe y la petición está bien formada; lo que no se puede
+     * procesar es un dato de adentro, el usuarioId.
+     */
+    @ExceptionHandler(UsuarioNoRegistradoException.class)
+    public ProblemDetail usuarioNoRegistrado(UsuarioNoRegistradoException e) {
+        ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
+        problema.setTitle("Usuario no registrado");
         return problema;
     }
 
