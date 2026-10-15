@@ -1,0 +1,15 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: order-service
+  kafka:
+    # Dirección de Kafka vista desde tu computador (ver docker-compose.yml)
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # Convierte el record ComandoOrden a JSON con Jackson 3
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      # Kafka confirma el mensaje solo cuando quedó guardado de forma segura
+      acks: all

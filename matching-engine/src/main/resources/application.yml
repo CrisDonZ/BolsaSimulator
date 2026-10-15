@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: matching-engine
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: matching-engine
+      # Si el grupo es nuevo, lee el tópico desde el principio
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # ErrorHandlingDeserializer evita que un mensaje mal formado bloquee al consumidor:
+      # lo registra como error y sigue con el siguiente.
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        "[spring.deserializer.value.delegate.class]": org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+        # Solo se aceptan clases de este paquete al convertir el JSON (seguridad)
+        "[spring.json.trusted.packages]": co.bolsasim.eventos
+    listener:
+      # 3 hilos consumidores para las 6 particiones: cada hilo atiende 2
+      concurrency: 3

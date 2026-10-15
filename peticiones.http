@@ -1,0 +1,64 @@
+### Peticiones de prueba. En IntelliJ, abre este archivo y presiona el ▶ verde de cada una.
+
+### 1. Compra límite: 100 acciones de ANDX pagando máximo 5.000 COP cada una
+POST http://localhost:8081/api/ordenes
+Content-Type: application/json
+
+{
+  "usuarioId": "cris",
+  "simbolo": "ANDX",
+  "lado": "COMPRA",
+  "tipo": "LIMITE",
+  "precioLimite": 5000,
+  "cantidad": 100
+}
+
+### 2. Venta límite de otro símbolo (puede caer en otra partición)
+POST http://localhost:8081/api/ordenes
+Content-Type: application/json
+
+{
+  "usuarioId": "cris",
+  "simbolo": "CAFE",
+  "lado": "VENTA",
+  "tipo": "LIMITE",
+  "precioLimite": 12000,
+  "cantidad": 20
+}
+
+### 3. Compra a mercado: sin precioLimite
+POST http://localhost:8081/api/ordenes
+Content-Type: application/json
+
+{
+  "usuarioId": "cris",
+  "simbolo": "ANDX",
+  "lado": "COMPRA",
+  "tipo": "MERCADO",
+  "cantidad": 10
+}
+
+### 4. Error a propósito: orden LIMITE sin precio -> 400 Bad Request
+POST http://localhost:8081/api/ordenes
+Content-Type: application/json
+
+{
+  "usuarioId": "cris",
+  "simbolo": "ANDX",
+  "lado": "COMPRA",
+  "tipo": "LIMITE",
+  "cantidad": 100
+}
+
+### 5. Error a propósito: cantidad 0 y símbolo demasiado largo -> 400 Bad Request
+POST http://localhost:8081/api/ordenes
+Content-Type: application/json
+
+{
+  "usuarioId": "cris",
+  "simbolo": "ANDXYZ",
+  "lado": "COMPRA",
+  "tipo": "LIMITE",
+  "precioLimite": 5000,
+  "cantidad": 0
+}

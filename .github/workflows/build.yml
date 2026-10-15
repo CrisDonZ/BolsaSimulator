@@ -1,0 +1,26 @@
+# Compila todo y corre las pruebas en cada push y pull request a main.
+# Si algo no compila o una prueba falla, GitHub lo marca en rojo.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # verify = compilar + pruebas + empaquetar, igual que mvn clean install pero sin copiar a ~/.m2
+      - name: Compilar y probar
+        run: mvn -B verify
