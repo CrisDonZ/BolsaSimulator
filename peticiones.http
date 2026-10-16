@@ -4,6 +4,9 @@
 ### Solo los usuarios registrados pueden enviar órdenes. Primero envía la petición 6 (registrar un usuario)
 ### y pega el "id" de la respuesta aquí abajo; las órdenes lo usan como {{usuarioId}}.
 @usuarioId = PEGA-AQUI-EL-ID-DEL-USUARIO
+###
+### Para probar la sesión (peticiones 9 a 13), envía la 9 (login) y pega aquí el "tokenRefresco" de la respuesta.
+@tokenRefresco = PEGA-AQUI-EL-TOKEN-DE-REFRESCO
 
 ### 1. Compra límite: 100 acciones de ANDX pagando máximo 5.000 COP cada una
 POST http://localhost:8081/api/ordenes
@@ -104,3 +107,43 @@ Content-Type: application/json
   "precioLimite": 5000,
   "cantidad": 100
 }
+
+### 9. Iniciar sesión (HU-02) -> 200 con tokenAcceso (JWT de 15 minutos) y tokenRefresco (7 días)
+POST http://localhost:8082/api/auth/login
+Content-Type: application/json
+
+{
+  "correo": "cris@correo.com",
+  "contrasena": "secreta123"
+}
+
+### 10. Error a propósito: contraseña equivocada -> 401 "Correo o contraseña incorrectos" (igual si el correo no existe)
+POST http://localhost:8082/api/auth/login
+Content-Type: application/json
+
+{
+  "correo": "cris@correo.com",
+  "contrasena": "equivocada"
+}
+
+### 11. Renovar el token de acceso con el de refresco -> 200 con un tokenAcceso nuevo
+POST http://localhost:8082/api/auth/refresh
+Content-Type: application/json
+
+{
+  "tokenRefresco": "{{tokenRefresco}}"
+}
+
+### 12. Cerrar sesión -> 204. Después, la petición 11 responde 401: el token de refresco ya no sirve.
+POST http://localhost:8082/api/auth/logout
+Content-Type: application/json
+
+{
+  "tokenRefresco": "{{tokenRefresco}}"
+}
+
+### 13. Clave pública con la que se verifica la firma de los tokens (la usará el gateway)
+GET http://localhost:8082/.well-known/jwks.json
+
+### 14. La misma clave en la ruta de Spring Authorization Server (alias de la 13)
+GET http://localhost:8082/oauth2/jwks

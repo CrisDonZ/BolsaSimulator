@@ -34,7 +34,7 @@ public class UsuarioController {
                 .body(UsuarioResponse.de(usuario));
     }
 
-    // Cuando exista el login (HU-02), cada usuario solo podrá consultarse a sí mismo (RNF-23)
+    // Cuando el gateway valide el JWT, cada usuario solo podrá consultarse a sí mismo (RNF-23)
     @GetMapping("/{id}")
     public UsuarioResponse buscar(@PathVariable UUID id) {
         return UsuarioResponse.de(servicioUsuarios.buscar(id));

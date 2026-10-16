@@ -3,6 +3,8 @@
 # matching-engine, registra un usuario (y comprueba que llega a users.registered y a order-service),
 # comprueba que una orden de un usuario desconocido recibe 422, envía con el id del usuario registrado
 # una venta y una compra que se cruzan y comprueba que el motor registra la ejecución a su nombre.
+# Por último inicia sesión con ese usuario, renueva el token de acceso y comprueba que, después de
+# cerrar sesión, el token de refresco ya no sirve.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
 # (la prueba arranca los suyos en los puertos 8081 y 8082).
@@ -94,5 +96,27 @@ enviar_orden "{\"usuarioId\":\"$ID\",\"simbolo\":\"TEST\",\"lado\":\"VENTA\",\"t
 enviar_orden "{\"usuarioId\":\"$ID\",\"simbolo\":\"TEST\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":10}"
 
 esperar "Ejecución: 10 acciones de TEST a 5000 COP .*($ID)" "$LOGS/matching-engine.log" 30
+echo "   El motor ejecutó las órdenes"
 
-echo "OK: el usuario se registró, sus órdenes viajaron por Kafka y el motor las ejecutó. Logs en $LOGS/"
+echo "6. Iniciando sesión, renovando el token y cerrando sesión..."
+sesion() {
+    curl -s -o "$LOGS/respuesta.json" -w "%{http_code}" -X POST "http://localhost:8082/api/auth/$1" \
+        -H "Content-Type: application/json" -d "$2"
+}
+comprobar() {
+    if [ "$2" != "$3" ]; then
+        echo "$1: se esperaba $3 y llegó $2"
+        cat "$LOGS/respuesta.json"
+        exit 1
+    fi
+}
+comprobar "Login" "$(sesion login "{\"correo\":\"prueba_$SUFIJO@bolsasim.co\",\"contrasena\":\"secreta123\"}")" 200
+REFRESCO=$(sed -E 's/.*"tokenRefresco":"([^"]+)".*/\1/' "$LOGS/respuesta.json")
+comprobar "Login con contraseña equivocada" \
+    "$(sesion login "{\"correo\":\"prueba_$SUFIJO@bolsasim.co\",\"contrasena\":\"equivocada\"}")" 401
+comprobar "Renovar el token" "$(sesion refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200
+comprobar "Cerrar sesión" "$(sesion logout "{\"tokenRefresco\":\"$REFRESCO\"}")" 204
+comprobar "Renovar después de cerrar sesión" "$(sesion refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
+echo "   Login 200, contraseña equivocada 401, refresco 200, logout 204 y refresco revocado 401"
+
+echo "OK: el usuario se registró, sus órdenes viajaron por Kafka, el motor las ejecutó y su sesión funciona. Logs en $LOGS/"

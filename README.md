@@ -1,6 +1,6 @@
 # BolsaSim — proyecto inicial
 
-Simulador de bolsa: **auth-service** registra a los usuarios; **order-service** recibe sus órdenes por REST y las publica en Kafka; **matching-engine** las lee y las cruza en el libro de órdenes de su símbolo. Por ahora las ejecuciones solo se muestran en el log.
+Simulador de bolsa: **auth-service** registra a los usuarios y les abre sesión con tokens JWT; **order-service** recibe sus órdenes por REST y las publica en Kafka; **matching-engine** las lee y las cruza en el libro de órdenes de su símbolo. Por ahora las ejecuciones solo se muestran en el log.
 
 Piensa en Kafka como un buzón con 6 casilleros (particiones). order-service deja cada orden en el casillero de su símbolo y el motor las recoge en el mismo orden en que llegaron.
 
@@ -20,7 +20,7 @@ Postman / curl ──POST /api/usuarios──▶ auth-service ──▶ PostgreS
 | `eventos/` | Java puro, sin Spring: los eventos `ComandoOrden` y `UsuarioRegistrado`, los enums y los nombres de tópicos. Lo comparten todos los servicios. |
 | `order-service/` | API REST `POST /api/ordenes`, validaciones y el publicador de Kafka. Escucha `users.registered` y guarda los ids en su base (tabla `usuario_registrado`) para aceptar solo órdenes de usuarios registrados. |
 | `matching-engine/` | El consumidor de Kafka y el libro de órdenes (`libro/`, Java puro con pruebas JUnit). |
-| `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. |
+| `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. |
 | `docker-compose.yml` | Kafka (modo KRaft), creación de tópicos, Kafka UI y PostgreSQL. |
 | `postgres/init.sql` | Crea una base por servicio la primera vez que arranca PostgreSQL. |
 | `peticiones.http` | Órdenes de ejemplo listas para enviar desde IntelliJ o la extensión REST Client de VS Code. |
@@ -52,7 +52,7 @@ Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bo
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 49 pruebas pasadas: 14 de order-service, 14 del libro de órdenes y 21 de auth-service. Las de integración de auth-service y order-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 88 pruebas pasadas: 14 de order-service, 14 del libro de órdenes y 60 de auth-service. Las de integración de auth-service y order-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -82,6 +82,33 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/usuarios -ContentT
 ```
 
 Responde `201 Created` con el usuario (sin la contraseña) y publica el evento en `users.registered`: míralo en Kafka UI. Si el correo ya existe: `409 Conflict` con "Ese correo ya tiene una cuenta.", y no se publica nada.
+
+**Inicia sesión (HU-02).** Por ahora ningún servicio exige el token (eso llega con el gateway), pero ya puedes probar el ciclo completo. En `peticiones.http` son las peticiones 9 a 14. Desde PowerShell:
+
+```powershell
+$sesion = Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/auth/login -ContentType "application/json" `
+  -Body '{"correo":"cris@correo.com","contrasena":"secreta123"}'
+$sesion.tokenAcceso      # JWT de 15 minutos: pégalo en https://jwt.io para ver lo que lleva
+$cuerpo = @{ tokenRefresco = $sesion.tokenRefresco } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/auth/refresh -ContentType "application/json" -Body $cuerpo
+Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/auth/logout -ContentType "application/json" -Body $cuerpo
+```
+
+| Endpoint | Responde |
+| --- | --- |
+| `POST /api/auth/login` | `200` con `tokenAcceso` (JWT de 15 min), `tokenRefresco` (7 días) y cuándo vence cada uno. Correo o contraseña equivocados: `401` "Correo o contraseña incorrectos", sin decir cuál falló. |
+| `POST /api/auth/refresh` | `200` con un `tokenAcceso` nuevo. Si la sesión se cerró o venció: `401`. |
+| `POST /api/auth/logout` | `204`. El token de refresco queda revocado. |
+| `GET /.well-known/jwks.json` (o `/oauth2/jwks`) | La clave pública para verificar la firma de los tokens, con `Cache-Control: max-age=300, public`. |
+
+El token de acceso lleva solo el id del usuario (`sub`) y su `rol`: nada de correo ni nombre, porque cualquiera que lo tenga puede leerlo. En la base solo se guarda el hash del token de refresco.
+
+**La clave de firma.** auth-service firma con RS256: la clave privada solo la tiene él, y los demás verifican con la pública. En desarrollo no tienes que hacer nada: si la variable `AUTH_JWT_CLAVE_PRIVADA` no existe, genera un par temporal al arrancar (lo avisa en el log) y, al reiniciar, los tokens anteriores dejan de valer. En un servidor genera la clave una vez y pásala por esa variable, nunca en el repositorio (RNF-26). Debe ser de al menos 2048 bits: con una más corta, auth-service no arranca.
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out clave-jwt.pem
+export AUTH_JWT_CLAVE_PRIVADA="$(cat clave-jwt.pem)"
+```
 
 **7. Envía una orden.** Solo los usuarios registrados pueden enviar órdenes: usa el `id` del paso 6. La forma más fácil es abrir `peticiones.http`, pegar el `id` en `@usuarioId` y presionar ▶. O desde la terminal (cambia `ID-DE-TU-USUARIO`):
 
@@ -151,19 +178,19 @@ Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
 
 ## Prueba de integración
 
-Comprueba todo el camino de una vez: levanta Kafka y PostgreSQL, arranca los tres servicios, registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, que una orden de un usuario desconocido reciba 422, envía con su id una venta y una compra que se cruzan y revisa que el motor registre la ejecución a nombre de ese usuario. Detén tus servicios antes (usa los puertos 8081 y 8082) y ten Docker abierto:
+Comprueba todo el camino de una vez: levanta Kafka y PostgreSQL, arranca los tres servicios, registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, que una orden de un usuario desconocido reciba 422, envía con su id una venta y una compra que se cruzan y revisa que el motor registre la ejecución a nombre de ese usuario. Al final inicia sesión con ese usuario, renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8081 y 8082) y ten Docker abierto:
 
 ```bash
 ./mvnw -B verify
 bash scripts/prueba-integracion.sh
 ```
 
-Debe terminar con `OK: el usuario se registró, sus órdenes viajaron por Kafka y el motor las ejecutó`. Los logs quedan en `target/integracion/`.
+Debe terminar con `OK: el usuario se registró, sus órdenes viajaron por Kafka, el motor las ejecutó y su sesión funciona`. Los logs quedan en `target/integracion/`.
 
 GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba de integración en cada push y pull request a `main`.
 
 ## Siguientes pasos
 
 - **Outbox:** si Kafka está caído justo después de registrar a alguien, hoy el evento se pierde. La tabla OUTBOX del modelo entidad-relación guarda el evento junto con el usuario y lo publica después.
-- **Login (HU-02):** token JWT; el `usuarioId` saldrá del token y no del cuerpo de la orden.
+- **Gateway:** validará el JWT de cada petición con la clave de `/.well-known/jwks.json` (RNF-22); el `usuarioId` de la orden saldrá del token y no del cuerpo.
 - **Ejecuciones en Kafka:** publicarlas en `trades.executed` para que el portafolio de cada usuario se entere de sus compras y ventas.

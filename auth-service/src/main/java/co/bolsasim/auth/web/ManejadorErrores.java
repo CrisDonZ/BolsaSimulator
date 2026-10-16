@@ -1,5 +1,7 @@
 package co.bolsasim.auth.web;
 
+import co.bolsasim.auth.servicio.CredencialesInvalidasException;
+import co.bolsasim.auth.servicio.TokenRefrescoInvalidoException;
 import co.bolsasim.auth.servicio.UsuarioDuplicadoException;
 import co.bolsasim.auth.servicio.UsuarioNoEncontradoException;
 import java.util.stream.Collectors;
@@ -37,6 +39,20 @@ public class ManejadorErrores {
     public ProblemDetail noEncontrado(UsuarioNoEncontradoException e) {
         ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, e.getMessage());
         problema.setTitle("Usuario no encontrado");
+        return problema;
+    }
+
+    @ExceptionHandler(CredencialesInvalidasException.class)
+    public ProblemDetail credencialesInvalidas(CredencialesInvalidasException e) {
+        ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, e.getMessage());
+        problema.setTitle("No se pudo iniciar sesión");
+        return problema;
+    }
+
+    @ExceptionHandler(TokenRefrescoInvalidoException.class)
+    public ProblemDetail tokenRefrescoInvalido(TokenRefrescoInvalidoException e) {
+        ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, e.getMessage());
+        problema.setTitle("Sesión no válida");
         return problema;
     }
 

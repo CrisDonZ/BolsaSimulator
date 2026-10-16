@@ -25,3 +25,14 @@ spring:
       ddl-auto: validate
     # Cada petición abre y cierra su propia conexión, sin consultas escondidas en la vista
     open-in-view: false
+
+bolsasim:
+  jwt:
+    # Va en el campo "iss" del token: el gateway comprobará que lo emitió auth-service
+    emisor: bolsasim-auth
+    duracion-acceso: 15m
+    duracion-refresco: 7d
+    # Clave privada RSA en formato PEM (PKCS#8), nunca en el repositorio (RNF-26).
+    # Si está vacía, auth-service genera un par temporal al arrancar: sirve en desarrollo y en CI,
+    # pero al reiniciar los tokens anteriores dejan de valer.
+    clave-privada: ${AUTH_JWT_CLAVE_PRIVADA:}
