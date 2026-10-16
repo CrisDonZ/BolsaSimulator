@@ -10,6 +10,15 @@ spring:
     url: ${AUTH_DB_URL:jdbc:postgresql://localhost:5433/auth}
     username: ${AUTH_DB_USUARIO:bolsasim}
     password: ${AUTH_DB_CLAVE:bolsasim}
+  kafka:
+    # Dirección de Kafka vista desde tu computador (ver docker-compose.yml)
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # Convierte el record UsuarioRegistrado a JSON con Jackson 3
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      # Kafka confirma el mensaje solo cuando quedó guardado de forma segura
+      acks: all
   jpa:
     # Las tablas las crea Flyway; Hibernate solo comprueba que coincidan con las entidades
     hibernate:

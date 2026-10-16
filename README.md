@@ -6,7 +6,7 @@ Piensa en Kafka como un buzón con 6 casilleros (particiones). order-service dej
 
 ```
 Postman / curl ──POST /api/usuarios──▶ auth-service ──▶ PostgreSQL (base "auth")
-               │                       (puerto 8082)
+               │                       (puerto 8082) ──▶ Kafka: users.registered (clave = id del usuario)
                │  usuarioId = id del usuario registrado
                └─POST /api/ordenes───▶ order-service ──▶ Kafka: orders.commands ──▶ matching-engine
                                        (puerto 8081)      (6 particiones,            (log: "Orden recibida")
@@ -17,10 +17,10 @@ Postman / curl ──POST /api/usuarios──▶ auth-service ──▶ PostgreS
 
 | Carpeta | Qué contiene |
 | --- | --- |
-| `eventos/` | Java puro, sin Spring: el evento `ComandoOrden`, los enums y los nombres de tópicos. Lo comparten todos los servicios. |
+| `eventos/` | Java puro, sin Spring: los eventos `ComandoOrden` y `UsuarioRegistrado`, los enums y los nombres de tópicos. Lo comparten todos los servicios. |
 | `order-service/` | API REST `POST /api/ordenes`, validaciones y el publicador de Kafka. Incluye pruebas unitarias. |
 | `matching-engine/` | El consumidor de Kafka y el libro de órdenes (`libro/`, Java puro con pruebas JUnit). |
-| `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. |
+| `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. |
 | `docker-compose.yml` | Kafka (modo KRaft), creación de tópicos, Kafka UI y PostgreSQL. |
 | `postgres/init.sql` | Crea una base por servicio la primera vez que arranca PostgreSQL. |
 | `peticiones.http` | Órdenes de ejemplo listas para enviar desde IntelliJ o la extensión REST Client de VS Code. |
@@ -44,7 +44,7 @@ En PowerShell los comandos son `.\mvnw.cmd ...`; en Git Bash, macOS o Linux, `./
 docker compose up -d
 ```
 
-Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bolsasim-postgres` deben decir *healthy*. Abre http://localhost:8090 para ver Kafka UI; en *Topics* debe aparecer `orders.commands` con 6 particiones.
+Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bolsasim-postgres` deben decir *healthy*. Abre http://localhost:8090 para ver Kafka UI; en *Topics* deben aparecer `orders.commands` y `users.registered`, cada uno con 6 particiones.
 
 **2. Compila todo y corre las pruebas:**
 
@@ -52,7 +52,7 @@ Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bo
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 33 pruebas pasadas: 4 de order-service, 14 del libro de órdenes y 15 de auth-service. Las 3 de integración de auth-service usan Docker (Testcontainers); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 39 pruebas pasadas: 4 de order-service, 14 del libro de órdenes y 21 de auth-service. Las 4 de integración de auth-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -81,7 +81,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/usuarios -ContentT
   -Body '{"nombre":"Cris","alias":"cris","correo":"cris@correo.com","contrasena":"secreta123","aceptaPoliticaDatos":true}'
 ```
 
-Responde `201 Created` con el usuario (sin la contraseña). Si el correo ya existe: `409 Conflict` con "Ese correo ya tiene una cuenta.".
+Responde `201 Created` con el usuario (sin la contraseña) y publica el evento en `users.registered`: míralo en Kafka UI. Si el correo ya existe: `409 Conflict` con "Ese correo ya tiene una cuenta.", y no se publica nada.
 
 **7. Envía una orden.** La forma más fácil es abrir `peticiones.http` en IntelliJ y presionar ▶. O desde la terminal (cambia `cris` por el `id` de tu usuario):
 
@@ -147,7 +147,7 @@ Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
 
 ## Prueba de integración
 
-Comprueba todo el camino de una vez: levanta Kafka y PostgreSQL, arranca los tres servicios, registra un usuario, envía con su id una venta y una compra que se cruzan y revisa que el motor registre la ejecución a nombre de ese usuario. Detén tus servicios antes (usa los puertos 8081 y 8082) y ten Docker abierto:
+Comprueba todo el camino de una vez: levanta Kafka y PostgreSQL, arranca los tres servicios, registra un usuario, comprueba que su evento llegue a `users.registered`, envía con su id una venta y una compra que se cruzan y revisa que el motor registre la ejecución a nombre de ese usuario. Detén tus servicios antes (usa los puertos 8081 y 8082) y ten Docker abierto:
 
 ```bash
 ./mvnw -B verify
@@ -160,6 +160,7 @@ GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba d
 
 ## Siguientes pasos
 
-- **Órdenes solo de usuarios registrados:** auth-service publica `users.registered` y order-service rechaza órdenes de un `usuarioId` que no existe. Hoy order-service acepta cualquier texto.
+- **Órdenes solo de usuarios registrados:** order-service consume `users.registered` y rechaza órdenes de un `usuarioId` que no existe. Hoy acepta cualquier texto.
+- **Outbox:** si Kafka está caído justo después de registrar a alguien, hoy el evento se pierde. La tabla OUTBOX del modelo entidad-relación guarda el evento junto con el usuario y lo publica después.
 - **Login (HU-02):** token JWT; el `usuarioId` saldrá del token y no del cuerpo de la orden.
 - **Ejecuciones en Kafka:** publicarlas en `trades.executed` para que el portafolio de cada usuario se entere de sus compras y ventas.
