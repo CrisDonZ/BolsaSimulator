@@ -1,11 +1,16 @@
-### Peticiones de prueba. En IntelliJ, abre este archivo y presiona el ▶ verde de cada una.
+### Peticiones de prueba. En IntelliJ, abre este archivo y presiona el ▶ verde de cada una;
+### en VS Code, con la extensión REST Client, haz clic en "Send Request".
+###
+### Solo los usuarios registrados pueden enviar órdenes. Primero envía la petición 6 (registrar un usuario)
+### y pega el "id" de la respuesta aquí abajo; las órdenes lo usan como {{usuarioId}}.
+@usuarioId = PEGA-AQUI-EL-ID-DEL-USUARIO
 
 ### 1. Compra límite: 100 acciones de ANDX pagando máximo 5.000 COP cada una
 POST http://localhost:8081/api/ordenes
 Content-Type: application/json
 
 {
-  "usuarioId": "cris",
+  "usuarioId": "{{usuarioId}}",
   "simbolo": "ANDX",
   "lado": "COMPRA",
   "tipo": "LIMITE",
@@ -18,7 +23,7 @@ POST http://localhost:8081/api/ordenes
 Content-Type: application/json
 
 {
-  "usuarioId": "cris",
+  "usuarioId": "{{usuarioId}}",
   "simbolo": "CAFE",
   "lado": "VENTA",
   "tipo": "LIMITE",
@@ -31,7 +36,7 @@ POST http://localhost:8081/api/ordenes
 Content-Type: application/json
 
 {
-  "usuarioId": "cris",
+  "usuarioId": "{{usuarioId}}",
   "simbolo": "ANDX",
   "lado": "COMPRA",
   "tipo": "MERCADO",
@@ -43,7 +48,7 @@ POST http://localhost:8081/api/ordenes
 Content-Type: application/json
 
 {
-  "usuarioId": "cris",
+  "usuarioId": "{{usuarioId}}",
   "simbolo": "ANDX",
   "lado": "COMPRA",
   "tipo": "LIMITE",
@@ -55,7 +60,7 @@ POST http://localhost:8081/api/ordenes
 Content-Type: application/json
 
 {
-  "usuarioId": "cris",
+  "usuarioId": "{{usuarioId}}",
   "simbolo": "ANDXYZ",
   "lado": "COMPRA",
   "tipo": "LIMITE",
@@ -85,4 +90,17 @@ Content-Type: application/json
   "correo": "cris@correo.com",
   "contrasena": "corta",
   "aceptaPoliticaDatos": false
+}
+
+### 8. Error a propósito: orden de un usuario que no está registrado -> 422 Unprocessable Content
+POST http://localhost:8081/api/ordenes
+Content-Type: application/json
+
+{
+  "usuarioId": "00000000-0000-0000-0000-000000000000",
+  "simbolo": "ANDX",
+  "lado": "COMPRA",
+  "tipo": "LIMITE",
+  "precioLimite": 5000,
+  "cantidad": 100
 }

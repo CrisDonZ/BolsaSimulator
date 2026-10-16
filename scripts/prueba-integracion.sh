@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prueba de punta a punta: levanta Kafka y PostgreSQL, arranca auth-service, order-service y
-# matching-engine, registra un usuario (y comprueba que llega a users.registered), envía con su id
+# matching-engine, registra un usuario (y comprueba que llega a users.registered y a order-service),
+# comprueba que una orden de un usuario desconocido recibe 422, envía con el id del usuario registrado
 # una venta y una compra que se cruzan y comprueba que el motor registra la ejecución a su nombre.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
@@ -74,7 +75,21 @@ if ! MSYS_NO_PATHCONV=1 docker exec bolsasim-kafka /opt/kafka/bin/kafka-console-
 fi
 echo "   Evento UsuarioRegistrado publicado en users.registered"
 
-echo "4. Enviando con su id una venta y una compra de TEST a 5000..."
+# order-service guarda el usuario en su copia local de forma asíncrona: hay que esperarlo
+esperar "Usuario $ID guardado en la copia local" "$LOGS/order-service.log" 30
+echo "   order-service ya conoce al usuario"
+
+echo "4. Enviando una orden de un usuario que no existe..."
+CODIGO=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8081/api/ordenes \
+    -H "Content-Type: application/json" \
+    -d '{"usuarioId":"00000000-0000-0000-0000-000000000000","simbolo":"TEST","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":10}')
+if [ "$CODIGO" != "422" ]; then
+    echo "Se esperaba 422 para un usuario desconocido y llegó $CODIGO"
+    exit 1
+fi
+echo "   Rechazada con 422, como debe ser"
+
+echo "5. Enviando con el id del usuario registrado una venta y una compra de TEST a 5000..."
 enviar_orden "{\"usuarioId\":\"$ID\",\"simbolo\":\"TEST\",\"lado\":\"VENTA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":10}"
 enviar_orden "{\"usuarioId\":\"$ID\",\"simbolo\":\"TEST\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":10}"
 

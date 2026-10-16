@@ -18,7 +18,7 @@ Postman / curl ──POST /api/usuarios──▶ auth-service ──▶ PostgreS
 | Carpeta | Qué contiene |
 | --- | --- |
 | `eventos/` | Java puro, sin Spring: los eventos `ComandoOrden` y `UsuarioRegistrado`, los enums y los nombres de tópicos. Lo comparten todos los servicios. |
-| `order-service/` | API REST `POST /api/ordenes`, validaciones y el publicador de Kafka. Incluye pruebas unitarias. |
+| `order-service/` | API REST `POST /api/ordenes`, validaciones y el publicador de Kafka. Escucha `users.registered` y guarda los ids en su base (tabla `usuario_registrado`) para aceptar solo órdenes de usuarios registrados. |
 | `matching-engine/` | El consumidor de Kafka y el libro de órdenes (`libro/`, Java puro con pruebas JUnit). |
 | `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. |
 | `docker-compose.yml` | Kafka (modo KRaft), creación de tópicos, Kafka UI y PostgreSQL. |
@@ -52,7 +52,7 @@ Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bo
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 39 pruebas pasadas: 4 de order-service, 14 del libro de órdenes y 21 de auth-service. Las 4 de integración de auth-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 49 pruebas pasadas: 14 de order-service, 14 del libro de órdenes y 21 de auth-service. Las de integración de auth-service y order-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -83,26 +83,27 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/usuarios -ContentT
 
 Responde `201 Created` con el usuario (sin la contraseña) y publica el evento en `users.registered`: míralo en Kafka UI. Si el correo ya existe: `409 Conflict` con "Ese correo ya tiene una cuenta.", y no se publica nada.
 
-**7. Envía una orden.** La forma más fácil es abrir `peticiones.http` en IntelliJ y presionar ▶. O desde la terminal (cambia `cris` por el `id` de tu usuario):
+**7. Envía una orden.** Solo los usuarios registrados pueden enviar órdenes: usa el `id` del paso 6. La forma más fácil es abrir `peticiones.http`, pegar el `id` en `@usuarioId` y presionar ▶. O desde la terminal (cambia `ID-DE-TU-USUARIO`):
 
 Git Bash, macOS o Linux:
 
 ```bash
 curl -X POST http://localhost:8081/api/ordenes \
   -H "Content-Type: application/json" \
-  -d '{"usuarioId":"cris","simbolo":"ANDX","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":100}'
+  -d '{"usuarioId":"ID-DE-TU-USUARIO","simbolo":"ANDX","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":100}'
 ```
 
 PowerShell de Windows:
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://localhost:8081/api/ordenes -ContentType "application/json" `
-  -Body '{"usuarioId":"cris","simbolo":"ANDX","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":100}'
+  -Body '{"usuarioId":"ID-DE-TU-USUARIO","simbolo":"ANDX","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":100}'
 ```
 
 ## Qué debes ver
 
 - **Respuesta:** `202 Accepted` con el `ordenId`. Es 202 y no 201 porque la orden se procesa después, cuando el motor la lea.
+- **Si el usuario no está registrado:** `422 Unprocessable Content` con el motivo, y la orden no se publica. order-service conoce a los usuarios por el tópico `users.registered`, así que justo después de registrarte puede tardar unos milisegundos en aceptarte.
 - **Log de order-service:** `Orden ... publicada en orders.commands (clave ANDX, partición 2, offset 0)`.
 - **Log de matching-engine:** `Orden recibida: NUEVA COMPRA 100 acciones de ANDX a 5000 COP | partición 2, offset 0`.
 - **Kafka UI:** en *Topics → orders.commands → Messages* aparece el mensaje en JSON.
@@ -123,7 +124,9 @@ El número de partición puede ser otro; lo importante es lo que muestran los ex
 | `Could not find artifact co.bolsasim:eventos` | Corriste un servicio sin compilar antes | Ejecuta `./mvnw clean install` en la raíz |
 | `Failed to install artifact co.bolsasim:eventos` | Un servicio corriendo tiene el jar bloqueado (Windows) | Detén los servicios y vuelve a compilar |
 | `release version 21 not supported` | Maven usa otro Java | Configura Java 21 en IntelliJ (*File → Project Structure → SDK*) |
-| auth-service: `Connection to localhost:5433 refused` | PostgreSQL no está arriba | `docker compose up -d postgres` y espera a *healthy* |
+| auth-service u order-service: `Connection to localhost:5433 refused` | PostgreSQL no está arriba | `docker compose up -d postgres` y espera a *healthy* |
+| order-service: `database "ordenes" does not exist` | Tu contenedor de PostgreSQL es de antes de que existiera esa base (`init.sql` solo corre la primera vez) | `docker exec bolsasim-postgres createdb -U bolsasim ordenes` |
+| `422` con "no está registrado" | El `usuarioId` no es el `id` de un usuario registrado | Registra uno con `POST /api/usuarios` y usa su `id` |
 
 ## El libro de órdenes
 
@@ -134,11 +137,12 @@ Cada símbolo tiene su libro con las compras y ventas que esperan contraparte. R
 - El precio de la ejecución es el de la orden que ya estaba esperando.
 - LIMITE: lo que no se ejecuta queda en el libro. MERCADO: lo que sobra se descarta.
 
-Pruébalo con los dos servicios corriendo:
+Pruébalo con los servicios corriendo y el `id` de un usuario registrado:
 
 ```powershell
-.\enviar-ordenes.ps1 -Simbolos ANDX -Lado VENTA -Precio 5000 -Cantidad 100 -Veces 1
-.\enviar-ordenes.ps1 -Simbolos ANDX -Lado COMPRA -Precio 5100 -Cantidad 150 -Veces 1
+$yo = "ID-DE-TU-USUARIO"
+.\enviar-ordenes.ps1 -UsuarioId $yo -Simbolos ANDX -Lado VENTA -Precio 5000 -Cantidad 100 -Veces 1
+.\enviar-ordenes.ps1 -UsuarioId $yo -Simbolos ANDX -Lado COMPRA -Precio 5100 -Cantidad 150 -Veces 1
 ```
 
 En el log de matching-engine verás `Ejecución: 100 acciones de ANDX a 5000 COP ...` y después `Libro ANDX | mejor compra 5100 | mejor venta -`: las 50 acciones que faltaron quedaron esperando.
@@ -147,7 +151,7 @@ Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
 
 ## Prueba de integración
 
-Comprueba todo el camino de una vez: levanta Kafka y PostgreSQL, arranca los tres servicios, registra un usuario, comprueba que su evento llegue a `users.registered`, envía con su id una venta y una compra que se cruzan y revisa que el motor registre la ejecución a nombre de ese usuario. Detén tus servicios antes (usa los puertos 8081 y 8082) y ten Docker abierto:
+Comprueba todo el camino de una vez: levanta Kafka y PostgreSQL, arranca los tres servicios, registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, que una orden de un usuario desconocido reciba 422, envía con su id una venta y una compra que se cruzan y revisa que el motor registre la ejecución a nombre de ese usuario. Detén tus servicios antes (usa los puertos 8081 y 8082) y ten Docker abierto:
 
 ```bash
 ./mvnw -B verify
@@ -160,7 +164,6 @@ GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba d
 
 ## Siguientes pasos
 
-- **Órdenes solo de usuarios registrados:** order-service consume `users.registered` y rechaza órdenes de un `usuarioId` que no existe. Hoy acepta cualquier texto.
 - **Outbox:** si Kafka está caído justo después de registrar a alguien, hoy el evento se pierde. La tabla OUTBOX del modelo entidad-relación guarda el evento junto con el usuario y lo publica después.
 - **Login (HU-02):** token JWT; el `usuarioId` saldrá del token y no del cuerpo de la orden.
 - **Ejecuciones en Kafka:** publicarlas en `trades.executed` para que el portafolio de cada usuario se entere de sus compras y ventas.
