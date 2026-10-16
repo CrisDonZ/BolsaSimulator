@@ -12,7 +12,7 @@
 
     <artifactId>auth-service</artifactId>
     <name>auth-service</name>
-    <description>Registro de usuarios; luego también inicio de sesión y tokens JWT</description>
+    <description>Registro de usuarios, inicio de sesión y tokens JWT</description>
 
     <dependencies>
         <dependency>
@@ -59,10 +59,16 @@
             <artifactId>spring-boot-starter-kafka</artifactId>
         </dependency>
 
-        <!-- Solo BCrypt para cifrar contraseñas. El resto de Spring Security (login, JWT) llega con HU-02. -->
+        <!-- Solo BCrypt para cifrar contraseñas, sin el filtro de seguridad de Spring Security:
+             validar el JWT en cada petición le toca al gateway (RNF-22) -->
         <dependency>
             <groupId>org.springframework.security</groupId>
             <artifactId>spring-security-crypto</artifactId>
+        </dependency>
+        <!-- Firma de los tokens JWT con RS256 (Nimbus JOSE + JWT, HU-02) -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-oauth2-jose</artifactId>
         </dependency>
 
         <!-- JUnit 5, AssertJ y Mockito -->

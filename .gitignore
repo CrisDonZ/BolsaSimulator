@@ -4,3 +4,7 @@ target/
 .vscode/
 .DS_Store
 *.log
+
+# Claves privadas (por ejemplo la del JWT): van en variables de entorno, nunca en el repositorio
+*.pem
+*.key
