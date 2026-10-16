@@ -144,3 +144,6 @@ Content-Type: application/json
 
 ### 13. Clave pública con la que se verifica la firma de los tokens (la usará el gateway)
 GET http://localhost:8082/.well-known/jwks.json
+
+### 14. La misma clave en la ruta de Spring Authorization Server (alias de la 13)
+GET http://localhost:8082/oauth2/jwks

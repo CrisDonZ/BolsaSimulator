@@ -35,6 +35,9 @@ public class ConfiguracionJwt {
 
     private static final Logger log = LoggerFactory.getLogger(ConfiguracionJwt.class);
 
+    // Una clave RSA de menos de 2048 bits ya no se considera segura (NIST SP 800-57)
+    private static final int MINIMO_BITS = 2048;
+
     @Bean
     public RSAKey claveFirma(PropiedadesJwt propiedades) {
         if (StringUtils.hasText(propiedades.clavePrivada())) {
@@ -50,7 +53,7 @@ public class ConfiguracionJwt {
         return new NimbusJwtEncoder(new ImmutableJWKSet<>(new JWKSet(claveFirma)));
     }
 
-    /** Lee una clave privada RSA en PEM (PKCS#8) y calcula su clave pública. */
+    /** Lee una clave privada RSA en PEM (PKCS#8) y calcula su clave pública. Rechaza claves de menos de 2048 bits. */
     static RSAKey desdePem(String pem) {
         // Acepta el PEM con saltos de línea reales o escritos como \n (así suelen llegar en variables de entorno)
         String base64 = pem.replace("\\n", "")
@@ -61,6 +64,10 @@ public class ConfiguracionJwt {
             KeyFactory fabrica = KeyFactory.getInstance("RSA");
             var privada = (RSAPrivateCrtKey) fabrica.generatePrivate(
                     new PKCS8EncodedKeySpec(Base64.getDecoder().decode(base64)));
+            if (privada.getModulus().bitLength() < MINIMO_BITS) {
+                throw new IllegalStateException("AUTH_JWT_CLAVE_PRIVADA es una clave RSA de "
+                        + privada.getModulus().bitLength() + " bits; el mínimo es " + MINIMO_BITS);
+            }
             var publica = (RSAPublicKey) fabrica.generatePublic(
                     new RSAPublicKeySpec(privada.getModulus(), privada.getPublicExponent()));
             return construir(publica, privada);
@@ -73,7 +80,7 @@ public class ConfiguracionJwt {
     static RSAKey generar() {
         try {
             KeyPairGenerator generador = KeyPairGenerator.getInstance("RSA");
-            generador.initialize(2048);
+            generador.initialize(MINIMO_BITS);
             var par = generador.generateKeyPair();
             return construir((RSAPublicKey) par.getPublic(), (RSAPrivateCrtKey) par.getPrivate());
         } catch (GeneralSecurityException e) {

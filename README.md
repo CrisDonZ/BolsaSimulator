@@ -52,7 +52,7 @@ Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bo
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 82 pruebas pasadas: 14 de order-service, 14 del libro de órdenes y 54 de auth-service. Las de integración de auth-service y order-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 88 pruebas pasadas: 14 de order-service, 14 del libro de órdenes y 60 de auth-service. Las de integración de auth-service y order-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -83,7 +83,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/usuarios -ContentT
 
 Responde `201 Created` con el usuario (sin la contraseña) y publica el evento en `users.registered`: míralo en Kafka UI. Si el correo ya existe: `409 Conflict` con "Ese correo ya tiene una cuenta.", y no se publica nada.
 
-**Inicia sesión (HU-02).** Por ahora ningún servicio exige el token (eso llega con el gateway), pero ya puedes probar el ciclo completo. En `peticiones.http` son las peticiones 9 a 13. Desde PowerShell:
+**Inicia sesión (HU-02).** Por ahora ningún servicio exige el token (eso llega con el gateway), pero ya puedes probar el ciclo completo. En `peticiones.http` son las peticiones 9 a 14. Desde PowerShell:
 
 ```powershell
 $sesion = Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/auth/login -ContentType "application/json" `
@@ -99,11 +99,11 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/auth/logout -Conte
 | `POST /api/auth/login` | `200` con `tokenAcceso` (JWT de 15 min), `tokenRefresco` (7 días) y cuándo vence cada uno. Correo o contraseña equivocados: `401` "Correo o contraseña incorrectos", sin decir cuál falló. |
 | `POST /api/auth/refresh` | `200` con un `tokenAcceso` nuevo. Si la sesión se cerró o venció: `401`. |
 | `POST /api/auth/logout` | `204`. El token de refresco queda revocado. |
-| `GET /.well-known/jwks.json` | La clave pública para verificar la firma de los tokens. |
+| `GET /.well-known/jwks.json` (o `/oauth2/jwks`) | La clave pública para verificar la firma de los tokens, con `Cache-Control: max-age=300, public`. |
 
 El token de acceso lleva solo el id del usuario (`sub`) y su `rol`: nada de correo ni nombre, porque cualquiera que lo tenga puede leerlo. En la base solo se guarda el hash del token de refresco.
 
-**La clave de firma.** auth-service firma con RS256: la clave privada solo la tiene él, y los demás verifican con la pública. En desarrollo no tienes que hacer nada: si la variable `AUTH_JWT_CLAVE_PRIVADA` no existe, genera un par temporal al arrancar (lo avisa en el log) y, al reiniciar, los tokens anteriores dejan de valer. En un servidor genera la clave una vez y pásala por esa variable, nunca en el repositorio (RNF-26):
+**La clave de firma.** auth-service firma con RS256: la clave privada solo la tiene él, y los demás verifican con la pública. En desarrollo no tienes que hacer nada: si la variable `AUTH_JWT_CLAVE_PRIVADA` no existe, genera un par temporal al arrancar (lo avisa en el log) y, al reiniciar, los tokens anteriores dejan de valer. En un servidor genera la clave una vez y pásala por esa variable, nunca en el repositorio (RNF-26). Debe ser de al menos 2048 bits: con una más corta, auth-service no arranca.
 
 ```bash
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out clave-jwt.pem

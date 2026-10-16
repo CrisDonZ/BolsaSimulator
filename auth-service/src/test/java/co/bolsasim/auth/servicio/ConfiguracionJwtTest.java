@@ -52,6 +52,23 @@ class ConfiguracionJwtTest {
     }
 
     @Test
+    void unaClaveRsaDe1024BitsSeRechazaPorqueEsDemasiadoCorta() throws Exception {
+        String pem1024 = pem(parRsa(1024), "\n");
+
+        assertThatThrownBy(() -> configuracion(pem1024))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("1024 bits")
+                .hasMessageContaining("2048");
+    }
+
+    @Test
+    void unaClaveRsaDe3072BitsSeAcepta() throws Exception {
+        RSAKey clave = configuracion(pem(parRsa(3072), "\n"));
+
+        assertThat(clave.size()).isEqualTo(3072);
+    }
+
+    @Test
     void elJwksPublicadoNoIncluyeLaParteSecretaDeLaClave() throws JOSEException {
         RSAKey publica = configuracion("").toPublicJWK();
 
@@ -65,8 +82,12 @@ class ConfiguracionJwtTest {
     }
 
     private static KeyPair parRsa() throws NoSuchAlgorithmException {
+        return parRsa(2048);
+    }
+
+    private static KeyPair parRsa(int bits) throws NoSuchAlgorithmException {
         KeyPairGenerator generador = KeyPairGenerator.getInstance("RSA");
-        generador.initialize(2048);
+        generador.initialize(bits);
         return generador.generateKeyPair();
     }
 
