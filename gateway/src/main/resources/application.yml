@@ -1,0 +1,38 @@
+server:
+  # La única puerta de entrada: el navegador y las herramientas hablan con el 8080
+  port: 8080
+
+bolsasim:
+  servicios:
+    # Dónde están los servicios. En otro entorno van en variables de entorno.
+    auth: ${AUTH_SERVICE_URL:http://localhost:8082}
+    ordenes: ${ORDER_SERVICE_URL:http://localhost:8081}
+  jwt:
+    # Clave pública con la que auth-service firma los tokens (se descarga una vez y se guarda en memoria)
+    jwk-set-uri: ${bolsasim.servicios.auth}/.well-known/jwks.json
+    # Solo se aceptan tokens emitidos por auth-service (campo "iss")
+    emisor: bolsasim-auth
+
+spring:
+  application:
+    name: gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          # El gateway reenvía cada petición tal cual, incluido el header Authorization con el JWT original
+          routes:
+            - id: auth-service
+              uri: ${bolsasim.servicios.auth}
+              predicates:
+                - Path=/api/usuarios/**,/api/auth/**,/.well-known/jwks.json,/oauth2/jwks
+            - id: order-service
+              uri: ${bolsasim.servicios.ordenes}
+              predicates:
+                - Path=/api/ordenes/**
+
+logging:
+  level:
+    # Aviso "HV000271 @Valid on a container" de las clases de Spring Cloud 2025.1 con el Hibernate Validator
+    # de Boot 4.1: es inofensivo y desaparece con Spring Cloud 2026.0
+    org.hibernate.validator.internal.metadata.aggregated.CascadingMetaDataBuilder: ERROR

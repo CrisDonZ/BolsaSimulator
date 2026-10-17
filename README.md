@@ -1,16 +1,17 @@
 # BolsaSim — proyecto inicial
 
-Simulador de bolsa: **auth-service** registra a los usuarios y les abre sesión con tokens JWT; **order-service** recibe sus órdenes por REST y las publica en Kafka; **matching-engine** las lee y las cruza en el libro de órdenes de su símbolo. Por ahora las ejecuciones solo se muestran en el log.
+Simulador de bolsa: el **gateway** es la única entrada y exige un token válido; **auth-service** registra a los usuarios y les abre sesión con tokens JWT; **order-service** recibe sus órdenes por REST y las publica en Kafka; **matching-engine** las lee y las cruza en el libro de órdenes de su símbolo. Por ahora las ejecuciones solo se muestran en el log.
 
 Piensa en Kafka como un buzón con 6 casilleros (particiones). order-service deja cada orden en el casillero de su símbolo y el motor las recoge en el mismo orden en que llegaron.
 
 ```
-Postman / curl ──POST /api/usuarios──▶ auth-service ──▶ PostgreSQL (base "auth")
-               │                       (puerto 8082) ──▶ Kafka: users.registered (clave = id del usuario)
-               │  usuarioId = id del usuario registrado
-               └─POST /api/ordenes───▶ order-service ──▶ Kafka: orders.commands ──▶ matching-engine
-                                       (puerto 8081)      (6 particiones,            (log: "Orden recibida")
-                                                           clave = símbolo)
+                         ┌─/api/usuarios, /api/auth──▶ auth-service ──▶ PostgreSQL (base "auth")
+Postman / curl ──▶ gateway                            (puerto 8082) ──▶ Kafka: users.registered
+               (puerto 8080)                                             (clave = id del usuario)
+       valida el JWT (RNF-22)
+                         └─/api/ordenes─────────────▶ order-service ──▶ Kafka: orders.commands ──▶ matching-engine
+                           (con el mismo header        (puerto 8081)     (6 particiones,            (log: "Orden recibida")
+                            Authorization)                               clave = símbolo)
 ```
 
 ## Estructura
@@ -21,12 +22,13 @@ Postman / curl ──POST /api/usuarios──▶ auth-service ──▶ PostgreS
 | `order-service/` | API REST `POST /api/ordenes`, validaciones y el publicador de Kafka. Escucha `users.registered` y guarda los ids en su base (tabla `usuario_registrado`) para aceptar solo órdenes de usuarios registrados. |
 | `matching-engine/` | El consumidor de Kafka y el libro de órdenes (`libro/`, Java puro con pruebas JUnit). |
 | `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. |
+| `gateway/` | Spring Cloud Gateway (WebFlux) en el puerto 8080: enruta a auth-service y order-service y exige un JWT válido, verificado con la clave pública de auth-service, salvo para registrarse, iniciar sesión, renovar el token y leer la clave. Reenvía el token original sin cambiarlo. |
 | `docker-compose.yml` | Kafka (modo KRaft), creación de tópicos, Kafka UI y PostgreSQL. |
 | `postgres/init.sql` | Crea una base por servicio la primera vez que arranca PostgreSQL. |
-| `peticiones.http` | Órdenes de ejemplo listas para enviar desde IntelliJ o la extensión REST Client de VS Code. |
-| `enviar-ordenes.ps1` | Envía varias órdenes de una vez desde PowerShell (ver el libro de órdenes abajo). |
+| `peticiones.http` | Registro, login y órdenes de ejemplo, listas para enviar desde IntelliJ o la extensión REST Client de VS Code. |
+| `enviar-ordenes.ps1` | Inicia sesión y envía varias órdenes de una vez desde PowerShell (ver el libro de órdenes abajo). |
 
-Versiones: Java 21, Spring Boot 4.1.1 (incluye Spring Kafka 4.1.1), Apache Kafka 4.2.1, PostgreSQL 17.
+Versiones: Java 21, Spring Boot 4.1.1 (incluye Spring Kafka 4.1.1), Spring Cloud 2025.1.3 (Gateway 5.0.3), Apache Kafka 4.2.1, PostgreSQL 17.
 
 ## Requisitos
 
@@ -52,7 +54,7 @@ Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bo
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 88 pruebas pasadas: 14 de order-service, 14 del libro de órdenes y 60 de auth-service. Las de integración de auth-service y order-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 104 pruebas pasadas: 14 de order-service, 14 del libro de órdenes, 60 de auth-service y 16 del gateway. Las de integración de auth-service y order-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -72,34 +74,50 @@ Debe terminar con `BUILD SUCCESS` y 88 pruebas pasadas: 14 de order-service, 14 
 ./mvnw -pl auth-service spring-boot:run
 ```
 
-En IntelliJ también puedes dar clic en el ▶ junto a `main` en `MatchingEngineApplication`, `OrderServiceApplication` y `AuthServiceApplication`.
+**6. Arranca el gateway** (terminal 4):
 
-**6. Registra un usuario.** Guarda el `id` de la respuesta: es el `usuarioId` de sus órdenes.
+```bash
+./mvnw -pl gateway spring-boot:run
+```
+
+En IntelliJ también puedes dar clic en el ▶ junto a `main` en `MatchingEngineApplication`, `OrderServiceApplication`, `AuthServiceApplication` y `GatewayApplication`.
+
+Desde aquí, todas las peticiones van al **gateway, puerto 8080**. La forma más fácil es `peticiones.http`: trae los pasos en orden.
+
+**7. Registra un usuario.**
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/usuarios -ContentType "application/json" `
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/usuarios -ContentType "application/json" `
   -Body '{"nombre":"Cris","alias":"cris","correo":"cris@correo.com","contrasena":"secreta123","aceptaPoliticaDatos":true}'
 ```
 
 Responde `201 Created` con el usuario (sin la contraseña) y publica el evento en `users.registered`: míralo en Kafka UI. Si el correo ya existe: `409 Conflict` con "Ese correo ya tiene una cuenta.", y no se publica nada.
 
-**Inicia sesión (HU-02).** Por ahora ningún servicio exige el token (eso llega con el gateway), pero ya puedes probar el ciclo completo. En `peticiones.http` son las peticiones 9 a 14. Desde PowerShell:
+**8. Inicia sesión (HU-02).** Guarda la respuesta: trae el token de acceso que piden las demás rutas.
 
 ```powershell
-$sesion = Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/auth/login -ContentType "application/json" `
+$sesion = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/auth/login -ContentType "application/json" `
   -Body '{"correo":"cris@correo.com","contrasena":"secreta123"}'
 $sesion.tokenAcceso      # JWT de 15 minutos: pégalo en https://jwt.io para ver lo que lleva
-$cuerpo = @{ tokenRefresco = $sesion.tokenRefresco } | ConvertTo-Json
-Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/auth/refresh -ContentType "application/json" -Body $cuerpo
-Invoke-RestMethod -Method Post -Uri http://localhost:8082/api/auth/logout -ContentType "application/json" -Body $cuerpo
+$auth = @{ Authorization = "Bearer $($sesion.tokenAcceso)" }
 ```
 
-| Endpoint | Responde |
-| --- | --- |
-| `POST /api/auth/login` | `200` con `tokenAcceso` (JWT de 15 min), `tokenRefresco` (7 días) y cuándo vence cada uno. Correo o contraseña equivocados: `401` "Correo o contraseña incorrectos", sin decir cuál falló. |
-| `POST /api/auth/refresh` | `200` con un `tokenAcceso` nuevo. Si la sesión se cerró o venció: `401`. |
-| `POST /api/auth/logout` | `204`. El token de refresco queda revocado. |
-| `GET /.well-known/jwks.json` (o `/oauth2/jwks`) | La clave pública para verificar la firma de los tokens, con `Cache-Control: max-age=300, public`. |
+Para renovar el token de acceso y cerrar sesión:
+
+```powershell
+$cuerpo = @{ tokenRefresco = $sesion.tokenRefresco } | ConvertTo-Json
+$nuevo = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/auth/refresh -ContentType "application/json" -Body $cuerpo
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/auth/logout -Headers $auth -ContentType "application/json" -Body $cuerpo
+```
+
+| Endpoint | ¿Pide token? | Responde |
+| --- | --- | --- |
+| `POST /api/usuarios` | No | `201` con el usuario registrado. |
+| `POST /api/auth/login` | No | `200` con `tokenAcceso` (JWT de 15 min), `tokenRefresco` (7 días) y cuándo vence cada uno. Correo o contraseña equivocados: `401` "Correo o contraseña incorrectos", sin decir cuál falló. |
+| `POST /api/auth/refresh` | No | `200` con un `tokenAcceso` nuevo. Si la sesión se cerró o venció: `401`. |
+| `POST /api/auth/logout` | Sí | `204`. El token de refresco queda revocado. Si el token de acceso ya venció, renuévalo primero. |
+| `GET /.well-known/jwks.json` (o `/oauth2/jwks`) | No | La clave pública para verificar la firma de los tokens, con `Cache-Control: max-age=300, public`. |
+| `GET /api/usuarios/{id}`, `/api/ordenes` y cualquier otra ruta | Sí | Sin token, con el token vencido, con la firma alterada o de otro emisor: `401` del gateway, y la petición no llega al servicio. |
 
 El token de acceso lleva solo el id del usuario (`sub`) y su `rol`: nada de correo ni nombre, porque cualquiera que lo tenga puede leerlo. En la base solo se guarda el hash del token de refresco.
 
@@ -110,26 +128,28 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out clave-jwt.pem
 export AUTH_JWT_CLAVE_PRIVADA="$(cat clave-jwt.pem)"
 ```
 
-**7. Envía una orden.** Solo los usuarios registrados pueden enviar órdenes: usa el `id` del paso 6. La forma más fácil es abrir `peticiones.http`, pegar el `id` en `@usuarioId` y presionar ▶. O desde la terminal (cambia `ID-DE-TU-USUARIO`):
+**9. Envía una orden** con el token del paso 8 y el `id` del usuario del paso 7 (por ahora order-service todavía lee el `usuarioId` del cuerpo):
 
-Git Bash, macOS o Linux:
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/ordenes -Headers $auth -ContentType "application/json" `
+  -Body '{"usuarioId":"ID-DE-TU-USUARIO","simbolo":"ANDX","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":100}'
+```
+
+Git Bash, macOS o Linux (cambia `TU-TOKEN` y `ID-DE-TU-USUARIO`):
 
 ```bash
-curl -X POST http://localhost:8081/api/ordenes \
+curl -X POST http://localhost:8080/api/ordenes \
+  -H "Authorization: Bearer TU-TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"usuarioId":"ID-DE-TU-USUARIO","simbolo":"ANDX","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":100}'
 ```
 
-PowerShell de Windows:
-
-```powershell
-Invoke-RestMethod -Method Post -Uri http://localhost:8081/api/ordenes -ContentType "application/json" `
-  -Body '{"usuarioId":"ID-DE-TU-USUARIO","simbolo":"ANDX","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":100}'
-```
+O con `enviar-ordenes.ps1`, que inicia sesión por ti y saca el id del token: `.\enviar-ordenes.ps1 -Correo cris@correo.com -Contrasena secreta123`.
 
 ## Qué debes ver
 
 - **Respuesta:** `202 Accepted` con el `ordenId`. Es 202 y no 201 porque la orden se procesa después, cuando el motor la lea.
+- **Sin token o con el token vencido:** `401 Unauthorized` del gateway; la orden ni siquiera llega a order-service.
 - **Si el usuario no está registrado:** `422 Unprocessable Content` con el motivo, y la orden no se publica. order-service conoce a los usuarios por el tópico `users.registered`, así que justo después de registrarte puede tardar unos milisegundos en aceptarte.
 - **Log de order-service:** `Orden ... publicada en orders.commands (clave ANDX, partición 2, offset 0)`.
 - **Log de matching-engine:** `Orden recibida: NUEVA COMPRA 100 acciones de ANDX a 5000 COP | partición 2, offset 0`.
@@ -154,6 +174,8 @@ El número de partición puede ser otro; lo importante es lo que muestran los ex
 | auth-service u order-service: `Connection to localhost:5433 refused` | PostgreSQL no está arriba | `docker compose up -d postgres` y espera a *healthy* |
 | order-service: `database "ordenes" does not exist` | Tu contenedor de PostgreSQL es de antes de que existiera esa base (`init.sql` solo corre la primera vez) | `docker exec bolsasim-postgres createdb -U bolsasim ordenes` |
 | `422` con "no está registrado" | El `usuarioId` no es el `id` de un usuario registrado | Registra uno con `POST /api/usuarios` y usa su `id` |
+| `401` con "Falta el token de acceso" | La petición no trae el header `Authorization: Bearer ...` | Inicia sesión (`POST /api/auth/login`) y envía el `tokenAcceso` |
+| `401` con "no es válido o ya venció" | Pasaron los 15 minutos, o reiniciaste auth-service (en desarrollo genera claves nuevas al arrancar) | Renueva con `POST /api/auth/refresh` o inicia sesión de nuevo |
 
 ## El libro de órdenes
 
@@ -164,12 +186,12 @@ Cada símbolo tiene su libro con las compras y ventas que esperan contraparte. R
 - El precio de la ejecución es el de la orden que ya estaba esperando.
 - LIMITE: lo que no se ejecuta queda en el libro. MERCADO: lo que sobra se descarta.
 
-Pruébalo con los servicios corriendo y el `id` de un usuario registrado:
+Pruébalo con los servicios y el gateway corriendo y el correo y la contraseña de un usuario registrado:
 
 ```powershell
-$yo = "ID-DE-TU-USUARIO"
-.\enviar-ordenes.ps1 -UsuarioId $yo -Simbolos ANDX -Lado VENTA -Precio 5000 -Cantidad 100 -Veces 1
-.\enviar-ordenes.ps1 -UsuarioId $yo -Simbolos ANDX -Lado COMPRA -Precio 5100 -Cantidad 150 -Veces 1
+$yo = @{ Correo = "cris@correo.com"; Contrasena = "secreta123" }
+.\enviar-ordenes.ps1 @yo -Simbolos ANDX -Lado VENTA -Precio 5000 -Cantidad 100 -Veces 1
+.\enviar-ordenes.ps1 @yo -Simbolos ANDX -Lado COMPRA -Precio 5100 -Cantidad 150 -Veces 1
 ```
 
 En el log de matching-engine verás `Ejecución: 100 acciones de ANDX a 5000 COP ...` y después `Libro ANDX | mejor compra 5100 | mejor venta -`: las 50 acciones que faltaron quedaron esperando.
@@ -178,19 +200,20 @@ Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
 
 ## Prueba de integración
 
-Comprueba todo el camino de una vez: levanta Kafka y PostgreSQL, arranca los tres servicios, registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, que una orden de un usuario desconocido reciba 422, envía con su id una venta y una compra que se cruzan y revisa que el motor registre la ejecución a nombre de ese usuario. Al final inicia sesión con ese usuario, renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8081 y 8082) y ten Docker abierto:
+Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los tres servicios y el gateway, registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, inicia sesión, comprueba que una orden sin token o con el token alterado reciba 401 y una de un usuario desconocido reciba 422, envía con el token una venta y una compra que se cruzan y revisa que el motor registre la ejecución a nombre de ese usuario. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080, 8081 y 8082) y ten Docker abierto:
 
 ```bash
 ./mvnw -B verify
 bash scripts/prueba-integracion.sh
 ```
 
-Debe terminar con `OK: el usuario se registró, sus órdenes viajaron por Kafka, el motor las ejecutó y su sesión funciona`. Los logs quedan en `target/integracion/`.
+Debe terminar con `OK: todo pasó por el gateway; el usuario se registró, inició sesión, sus órdenes viajaron por Kafka y el motor las ejecutó`. Los logs quedan en `target/integracion/`.
 
 GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba de integración en cada push y pull request a `main`.
 
 ## Siguientes pasos
 
 - **Outbox:** si Kafka está caído justo después de registrar a alguien, hoy el evento se pierde. La tabla OUTBOX del modelo entidad-relación guarda el evento junto con el usuario y lo publica después.
-- **Gateway:** validará el JWT de cada petición con la clave de `/.well-known/jwks.json` (RNF-22); el `usuarioId` de la orden saldrá del token y no del cuerpo.
+- **order-service valida el JWT:** el `usuarioId` de la orden saldrá del token (campo `sub`) y no del cuerpo. Hoy el puerto 8081 sigue abierto y acepta órdenes sin token si se llama directo, sin pasar por el gateway.
+- **Límite de órdenes (RNF-24):** 20 órdenes por segundo por usuario en el gateway; el exceso recibe 429.
 - **Ejecuciones en Kafka:** publicarlas en `trades.executed` para que el portafolio de cada usuario se entere de sus compras y ventas.
