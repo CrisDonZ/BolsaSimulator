@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Prueba de punta a punta: levanta Kafka y PostgreSQL, arranca auth-service, order-service y
-# matching-engine, registra un usuario (y comprueba que llega a users.registered y a order-service),
-# comprueba que una orden de un usuario desconocido recibe 422, envía con el id del usuario registrado
-# una venta y una compra que se cruzan y comprueba que el motor registra la ejecución a su nombre.
-# Por último inicia sesión con ese usuario, renueva el token de acceso y comprueba que, después de
+# Prueba de punta a punta, todo a través del gateway (puerto 8080): levanta Kafka y PostgreSQL, arranca
+# auth-service, order-service, matching-engine y el gateway, registra un usuario (y comprueba que llega a
+# users.registered y a order-service), inicia sesión, comprueba que sin token se recibe 401 y que una orden
+# de un usuario desconocido recibe 422, envía con el token una venta y una compra que se cruzan y comprueba
+# que el motor registra la ejecución a su nombre. Por último renueva el token y comprueba que, después de
 # cerrar sesión, el token de refresco ya no sirve.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
-# (la prueba arranca los suyos en los puertos 8081 y 8082).
+# (la prueba arranca los suyos en los puertos 8080, 8081 y 8082).
 #
 #   bash scripts/prueba-integracion.sh
 set -euo pipefail
@@ -16,10 +16,11 @@ cd "$(dirname "$0")/.."
 LOGS=target/integracion
 mkdir -p "$LOGS"
 JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+GATEWAY=http://localhost:8080
 
-for puerto in 8081 8082; do
+for puerto in 8080 8081 8082; do
     if curl -s -o /dev/null "http://localhost:$puerto"; then
-        echo "El puerto $puerto está ocupado: detén order-service y auth-service antes de correr la prueba."
+        echo "El puerto $puerto está ocupado: detén el gateway, order-service y auth-service antes de correr la prueba."
         exit 1
     fi
 done
@@ -36,35 +37,61 @@ esperar() {
     return 1
 }
 
-enviar_orden() {
-    curl -sf -X POST http://localhost:8081/api/ordenes -H "Content-Type: application/json" -d "$1" > /dev/null
+# Hace una petición al gateway y devuelve el código HTTP; el cuerpo queda en $LOGS/respuesta.json.
+# Uso: pedir MÉTODO RUTA [CUERPO] [TOKEN]
+pedir() {
+    local metodo=$1 ruta=$2 cuerpo=${3:-} token=${4:-}
+    local argumentos=(-s -o "$LOGS/respuesta.json" -w "%{http_code}" -X "$metodo" "$GATEWAY$ruta")
+    if [ -n "$cuerpo" ]; then
+        argumentos+=(-H "Content-Type: application/json" -d "$cuerpo")
+    fi
+    if [ -n "$token" ]; then
+        argumentos+=(-H "Authorization: Bearer $token")
+    fi
+    curl "${argumentos[@]}"
+}
+
+# Falla con la respuesta a la vista si el código no es el esperado. Uso: comprobar DESCRIPCIÓN CÓDIGO ESPERADO
+comprobar() {
+    if [ "$2" != "$3" ]; then
+        echo "$1: se esperaba $3 y llegó $2"
+        cat "$LOGS/respuesta.json"
+        exit 1
+    fi
+}
+
+# Saca un campo de texto de la última respuesta JSON. Uso: campo NOMBRE
+campo() {
+    sed -E "s/.*\"$1\":\"([^\"]+)\".*/\1/" "$LOGS/respuesta.json"
 }
 
 echo "1. Levantando Kafka y PostgreSQL..."
 docker compose up -d --wait kafka postgres
 docker compose up --exit-code-from kafka-init kafka-init > /dev/null
 
-echo "2. Arrancando auth-service, matching-engine y order-service..."
+echo "2. Arrancando auth-service, matching-engine, order-service y el gateway..."
 "$JAVA" -jar auth-service/target/auth-service-*[0-9T].jar > "$LOGS/auth-service.log" 2>&1 &
 USUARIOS=$!
 "$JAVA" -jar matching-engine/target/matching-engine-*[0-9T].jar > "$LOGS/matching-engine.log" 2>&1 &
 MOTOR=$!
 "$JAVA" -jar order-service/target/order-service-*[0-9T].jar > "$LOGS/order-service.log" 2>&1 &
 ORDENES=$!
-trap 'kill $USUARIOS $MOTOR $ORDENES 2>/dev/null || true' EXIT
+"$JAVA" -jar gateway/target/gateway-*[0-9T].jar > "$LOGS/gateway.log" 2>&1 &
+ENTRADA=$!
+trap 'kill $USUARIOS $MOTOR $ORDENES $ENTRADA 2>/dev/null || true' EXIT
 
 esperar "Started AuthServiceApplication" "$LOGS/auth-service.log" 60
 esperar "Started OrderServiceApplication" "$LOGS/order-service.log" 60
+esperar "Started GatewayApplication" "$LOGS/gateway.log" 60
 esperar "partitions assigned" "$LOGS/matching-engine.log" 60
 
-echo "3. Registrando un usuario..."
+echo "3. Registrando un usuario a través del gateway..."
 # Alias y correo distintos en cada corrida: PostgreSQL conserva los usuarios mientras el contenedor exista
 SUFIJO=$(date +%s)
-USUARIO=$(curl -sf -X POST http://localhost:8082/api/usuarios -H "Content-Type: application/json" -d \
-    "{\"nombre\":\"Usuario de prueba\",\"alias\":\"prueba_$SUFIJO\",\"correo\":\"prueba_$SUFIJO@bolsasim.co\",
-      \"contrasena\":\"secreta123\",\"aceptaPoliticaDatos\":true}")
-ID=$(echo "$USUARIO" | sed -E 's/.*"id":"([^"]+)".*/\1/')
-curl -sf -o /dev/null "http://localhost:8082/api/usuarios/$ID"
+CORREO="prueba_$SUFIJO@bolsasim.co"
+comprobar "Registro" "$(pedir POST /api/usuarios "{\"nombre\":\"Usuario de prueba\",\"alias\":\"prueba_$SUFIJO\",
+    \"correo\":\"$CORREO\",\"contrasena\":\"secreta123\",\"aceptaPoliticaDatos\":true}")" 201
+ID=$(campo id)
 echo "   Usuario $ID"
 
 # MSYS_NO_PATHCONV: en Git Bash de Windows evita que /opt/... se convierta en una ruta de Windows
@@ -81,42 +108,38 @@ echo "   Evento UsuarioRegistrado publicado en users.registered"
 esperar "Usuario $ID guardado en la copia local" "$LOGS/order-service.log" 30
 echo "   order-service ya conoce al usuario"
 
-echo "4. Enviando una orden de un usuario que no existe..."
-CODIGO=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8081/api/ordenes \
-    -H "Content-Type: application/json" \
-    -d '{"usuarioId":"00000000-0000-0000-0000-000000000000","simbolo":"TEST","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":10}')
-if [ "$CODIGO" != "422" ]; then
-    echo "Se esperaba 422 para un usuario desconocido y llegó $CODIGO"
-    exit 1
-fi
-echo "   Rechazada con 422, como debe ser"
+echo "4. Iniciando sesión..."
+comprobar "Login" "$(pedir POST /api/auth/login "{\"correo\":\"$CORREO\",\"contrasena\":\"secreta123\"}")" 200
+TOKEN=$(campo tokenAcceso)
+REFRESCO=$(campo tokenRefresco)
+comprobar "Consultar el usuario con el token" "$(pedir GET "/api/usuarios/$ID" "" "$TOKEN")" 200
+comprobar "Login con contraseña equivocada" \
+    "$(pedir POST /api/auth/login "{\"correo\":\"$CORREO\",\"contrasena\":\"equivocada\"}")" 401
+echo "   Login 200, consulta con token 200 y contraseña equivocada 401"
 
-echo "5. Enviando con el id del usuario registrado una venta y una compra de TEST a 5000..."
-enviar_orden "{\"usuarioId\":\"$ID\",\"simbolo\":\"TEST\",\"lado\":\"VENTA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":10}"
-enviar_orden "{\"usuarioId\":\"$ID\",\"simbolo\":\"TEST\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":10}"
+echo "5. Comprobando las órdenes rechazadas..."
+ORDEN_DESCONOCIDO='{"usuarioId":"00000000-0000-0000-0000-000000000000","simbolo":"TEST","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":10}'
+comprobar "Orden sin token" "$(pedir POST /api/ordenes "$ORDEN_DESCONOCIDO")" 401
+comprobar "Orden con un token alterado" "$(pedir POST /api/ordenes "$ORDEN_DESCONOCIDO" "${TOKEN}x")" 401
+comprobar "Orden de un usuario que no existe" "$(pedir POST /api/ordenes "$ORDEN_DESCONOCIDO" "$TOKEN")" 422
+echo "   Sin token 401, token alterado 401 y usuario desconocido 422"
+
+echo "6. Enviando con el token una venta y una compra de TEST a 5000..."
+comprobar "Venta" "$(pedir POST /api/ordenes \
+    "{\"usuarioId\":\"$ID\",\"simbolo\":\"TEST\",\"lado\":\"VENTA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":10}" \
+    "$TOKEN")" 202
+comprobar "Compra" "$(pedir POST /api/ordenes \
+    "{\"usuarioId\":\"$ID\",\"simbolo\":\"TEST\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":10}" \
+    "$TOKEN")" 202
 
 esperar "Ejecución: 10 acciones de TEST a 5000 COP .*($ID)" "$LOGS/matching-engine.log" 30
 echo "   El motor ejecutó las órdenes"
 
-echo "6. Iniciando sesión, renovando el token y cerrando sesión..."
-sesion() {
-    curl -s -o "$LOGS/respuesta.json" -w "%{http_code}" -X POST "http://localhost:8082/api/auth/$1" \
-        -H "Content-Type: application/json" -d "$2"
-}
-comprobar() {
-    if [ "$2" != "$3" ]; then
-        echo "$1: se esperaba $3 y llegó $2"
-        cat "$LOGS/respuesta.json"
-        exit 1
-    fi
-}
-comprobar "Login" "$(sesion login "{\"correo\":\"prueba_$SUFIJO@bolsasim.co\",\"contrasena\":\"secreta123\"}")" 200
-REFRESCO=$(sed -E 's/.*"tokenRefresco":"([^"]+)".*/\1/' "$LOGS/respuesta.json")
-comprobar "Login con contraseña equivocada" \
-    "$(sesion login "{\"correo\":\"prueba_$SUFIJO@bolsasim.co\",\"contrasena\":\"equivocada\"}")" 401
-comprobar "Renovar el token" "$(sesion refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200
-comprobar "Cerrar sesión" "$(sesion logout "{\"tokenRefresco\":\"$REFRESCO\"}")" 204
-comprobar "Renovar después de cerrar sesión" "$(sesion refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
-echo "   Login 200, contraseña equivocada 401, refresco 200, logout 204 y refresco revocado 401"
+echo "7. Renovando el token y cerrando sesión..."
+comprobar "Renovar el token" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200
+comprobar "Cerrar sesión sin token" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
+comprobar "Cerrar sesión" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"$REFRESCO\"}" "$TOKEN")" 204
+comprobar "Renovar después de cerrar sesión" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
+echo "   Refresco 200, logout sin token 401, logout 204 y refresco revocado 401"
 
-echo "OK: el usuario se registró, sus órdenes viajaron por Kafka, el motor las ejecutó y su sesión funciona. Logs en $LOGS/"
+echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, sus órdenes viajaron por Kafka y el motor las ejecutó. Logs en $LOGS/"
