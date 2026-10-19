@@ -22,12 +22,15 @@ public class ServicioOrdenes {
         this.usuarios = usuarios;
     }
 
-    public ComandoOrden crear(CrearOrdenRequest request) {
+    /**
+     * @param usuarioId el "sub" del token de acceso: quien pone la orden es quien inició sesión
+     */
+    public ComandoOrden crear(String usuarioId, CrearOrdenRequest request) {
         validarPrecio(request);
-        validarUsuario(request.usuarioId());
+        validarUsuario(usuarioId);
 
         ComandoOrden comando = ComandoOrden.nueva(
-                request.usuarioId(),
+                usuarioId,
                 request.simbolo(),
                 request.lado(),
                 request.tipo(),
@@ -39,8 +42,9 @@ public class ServicioOrdenes {
     }
 
     /**
-     * El usuario debe estar en la copia local que llena users.registered. Un id que ni siquiera
-     * es un UUID (por ejemplo "cris") tampoco puede ser un usuario registrado.
+     * El usuario debe estar en la copia local que llena users.registered: puede iniciar sesión unos
+     * milisegundos antes de que llegue su evento. Un id que ni siquiera es un UUID tampoco puede ser
+     * un usuario registrado.
      */
     private void validarUsuario(String usuarioId) {
         UUID id;

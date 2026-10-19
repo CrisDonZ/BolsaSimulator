@@ -1,6 +1,6 @@
 package co.bolsasim.order.servicio;
 
-/** El usuarioId de la orden no corresponde a ningún usuario registrado en auth-service. */
+/** El usuario del token ("sub") no está en la copia local de usuarios registrados en auth-service. */
 public class UsuarioNoRegistradoException extends RuntimeException {
 
     private static final long serialVersionUID = 1L;

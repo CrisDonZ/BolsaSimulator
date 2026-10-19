@@ -10,11 +10,11 @@ import jakarta.validation.constraints.Positive;
 /**
  * Lo que el cliente envía en el cuerpo de POST /api/ordenes.
  *
- * <p>usuarioId llega en el cuerpo solo mientras no exista el login.
- * Cuando esté auth-service, saldrá del token JWT y se quitará de aquí.
+ * <p>No lleva el id del usuario: sale del token de acceso (claim "sub"), así nadie puede poner
+ * órdenes a nombre de otro (RNF-23). Si el cuerpo trae usuarioId, o cualquier campo que no esté
+ * aquí, la orden se rechaza con 400.
  */
 public record CrearOrdenRequest(
-        @NotBlank String usuarioId,
         @NotBlank @Pattern(regexp = "[A-Za-z]{3,5}", message = "debe tener de 3 a 5 letras") String simbolo,
         @NotNull Lado lado,
         @NotNull TipoOrden tipo,

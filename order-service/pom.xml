@@ -32,6 +32,12 @@
             <artifactId>spring-boot-starter-kafka</artifactId>
         </dependency>
 
+        <!-- Valida el JWT de cada petición con la clave pública de auth-service (RNF-22) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
+        </dependency>
+
         <!-- @NotBlank, @Positive... para validar lo que llega por la API -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -69,6 +75,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Hace que @WebMvcTest pase por los mismos filtros de seguridad que el servicio real -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-oauth2-resource-server-test</artifactId>
             <scope>test</scope>
         </dependency>
         <!-- PostgreSQL y Kafka reales en contenedores durante las pruebas (RNF-36) -->
