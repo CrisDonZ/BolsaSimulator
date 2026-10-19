@@ -1,6 +1,15 @@
 server:
   port: 8081
 
+bolsasim:
+  servicios:
+    auth: ${AUTH_SERVICE_URL:http://localhost:8082}
+  jwt:
+    # Clave pública con la que se verifica la firma de los tokens. Se descarga en la primera orden
+    # y queda en caché, así order-service arranca aunque auth-service todavía no esté listo.
+    jwk-set-uri: ${bolsasim.servicios.auth}/.well-known/jwks.json
+    emisor: bolsasim-auth
+
 spring:
   application:
     name: order-service
@@ -10,6 +19,11 @@ spring:
     url: ${ORDENES_DB_URL:jdbc:postgresql://localhost:5433/ordenes}
     username: ${ORDENES_DB_USUARIO:bolsasim}
     password: ${ORDENES_DB_CLAVE:bolsasim}
+  jackson:
+    deserialization:
+      # Un campo que no existe en la orden (por ejemplo usuarioId, que ahora sale del token) es un error 400,
+      # no algo que se ignora en silencio (RNF-25)
+      fail-on-unknown-properties: true
   jpa:
     # Las tablas las crea Flyway; Hibernate solo comprueba que coincidan con las entidades
     hibernate:

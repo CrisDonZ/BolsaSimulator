@@ -3,7 +3,8 @@
 ###
 ### Todo pasa por el gateway (puerto 8080), que exige un token salvo para registrarse, iniciar sesión,
 ### renovar el token y leer la clave pública. Orden de uso:
-###   1. Envía la petición 1 (registrar) y pega el "id" de la respuesta en @usuarioId.
+###   1. Envía la petición 1 (registrar) y pega el "id" de la respuesta en @usuarioId (solo lo usa la 5:
+###      las órdenes no lo llevan, porque order-service toma el usuario del token).
 ###   2. Envía la petición 3 (login) y pega el "tokenAcceso" en @token y el "tokenRefresco" en @tokenRefresco.
 ###   3. Ya puedes enviar órdenes. El token de acceso dura 15 minutos: si recibes 401, usa la 13 o la 3 otra vez.
 @gateway = http://localhost:8080
@@ -58,13 +59,12 @@ Content-Type: application/json
 GET {{gateway}}/api/usuarios/{{usuarioId}}
 Authorization: Bearer {{token}}
 
-### 6. Compra límite: 100 acciones de ANDX pagando máximo 5.000 COP cada una
+### 6. Compra límite: 100 acciones de ANDX pagando máximo 5.000 COP cada una (a nombre del usuario del token)
 POST {{gateway}}/api/ordenes
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
 {
-  "usuarioId": "{{usuarioId}}",
   "simbolo": "ANDX",
   "lado": "COMPRA",
   "tipo": "LIMITE",
@@ -78,7 +78,6 @@ Authorization: Bearer {{token}}
 Content-Type: application/json
 
 {
-  "usuarioId": "{{usuarioId}}",
   "simbolo": "CAFE",
   "lado": "VENTA",
   "tipo": "LIMITE",
@@ -92,7 +91,6 @@ Authorization: Bearer {{token}}
 Content-Type: application/json
 
 {
-  "usuarioId": "{{usuarioId}}",
   "simbolo": "ANDX",
   "lado": "COMPRA",
   "tipo": "MERCADO",
@@ -104,7 +102,6 @@ POST {{gateway}}/api/ordenes
 Content-Type: application/json
 
 {
-  "usuarioId": "{{usuarioId}}",
   "simbolo": "ANDX",
   "lado": "COMPRA",
   "tipo": "LIMITE",
@@ -118,7 +115,6 @@ Authorization: Bearer {{token}}
 Content-Type: application/json
 
 {
-  "usuarioId": "{{usuarioId}}",
   "simbolo": "ANDX",
   "lado": "COMPRA",
   "tipo": "LIMITE",
@@ -131,7 +127,6 @@ Authorization: Bearer {{token}}
 Content-Type: application/json
 
 {
-  "usuarioId": "{{usuarioId}}",
   "simbolo": "ANDXYZ",
   "lado": "COMPRA",
   "tipo": "LIMITE",
@@ -139,7 +134,8 @@ Content-Type: application/json
   "cantidad": 0
 }
 
-### 12. Error a propósito: orden de un usuario que no está registrado -> 422 Unprocessable Content
+### 12. Error a propósito: orden a nombre de otro usuario -> 400 "usuarioId ya no se envía". La orden siempre es
+###     del usuario del token; si el cuerpo trae usuarioId (o cualquier campo que no existe), se rechaza.
 POST {{gateway}}/api/ordenes
 Authorization: Bearer {{token}}
 Content-Type: application/json

@@ -38,7 +38,7 @@ class ServicioOrdenesTest {
     void ordenLimiteValidaSePublicaConElSimboloEnMayusculas() {
         var request = orden("andx", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100);
 
-        ComandoOrden comando = servicio.crear(request);
+        ComandoOrden comando = servicio.crear(REGISTRADO.toString(), request);
 
         assertThat(comando.simbolo()).isEqualTo("ANDX");
         assertThat(comando.accion()).isEqualTo(AccionComando.NUEVA);
@@ -48,8 +48,8 @@ class ServicioOrdenesTest {
     }
 
     @Test
-    void ordenDeUnUsuarioRegistradoSePublicaConSuId() {
-        ComandoOrden comando = servicio.crear(orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100));
+    void laOrdenSePublicaANombreDelUsuarioQueRecibe() {
+        ComandoOrden comando = servicio.crear(REGISTRADO.toString(), orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100));
 
         assertThat(comando.usuarioId()).isEqualTo(REGISTRADO.toString());
         verify(publicador).publicar(comando);
@@ -58,9 +58,9 @@ class ServicioOrdenesTest {
     @Test
     void ordenDeUnUsuarioDesconocidoSeRechazaYNoSePublica() {
         String desconocido = UUID.randomUUID().toString();
-        var request = new CrearOrdenRequest(desconocido, "ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100);
+        var request = orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100);
 
-        assertThatThrownBy(() -> servicio.crear(request))
+        assertThatThrownBy(() -> servicio.crear(desconocido, request))
                 .isInstanceOf(UsuarioNoRegistradoException.class)
                 .hasMessageContaining(desconocido);
         verifyNoInteractions(publicador);
@@ -68,9 +68,9 @@ class ServicioOrdenesTest {
 
     @Test
     void unUsuarioIdQueNoEsUnUuidTampocoEsUnUsuarioRegistrado() {
-        var request = new CrearOrdenRequest("cris", "ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100);
+        var request = orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100);
 
-        assertThatThrownBy(() -> servicio.crear(request))
+        assertThatThrownBy(() -> servicio.crear("cris", request))
                 .isInstanceOf(UsuarioNoRegistradoException.class)
                 .hasMessageContaining("cris");
         verifyNoInteractions(publicador);
@@ -80,7 +80,7 @@ class ServicioOrdenesTest {
     void ordenLimiteSinPrecioSeRechazaYNoSePublica() {
         var request = orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, null, 100);
 
-        assertThatThrownBy(() -> servicio.crear(request))
+        assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), request))
                 .isInstanceOf(OrdenInvalidaException.class)
                 .hasMessageContaining("precioLimite");
         verifyNoInteractions(publicador);
@@ -90,7 +90,7 @@ class ServicioOrdenesTest {
     void ordenAMercadoConPrecioSeRechazaYNoSePublica() {
         var request = orden("ANDX", Lado.VENTA, TipoOrden.MERCADO, 5_000L, 10);
 
-        assertThatThrownBy(() -> servicio.crear(request))
+        assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), request))
                 .isInstanceOf(OrdenInvalidaException.class)
                 .hasMessageContaining("MERCADO");
         verifyNoInteractions(publicador);
@@ -100,14 +100,13 @@ class ServicioOrdenesTest {
     void ordenAMercadoSinPrecioSePublica() {
         var request = orden("CAFE", Lado.VENTA, TipoOrden.MERCADO, null, 10);
 
-        ComandoOrden comando = servicio.crear(request);
+        ComandoOrden comando = servicio.crear(REGISTRADO.toString(), request);
 
         assertThat(comando.precioLimite()).isNull();
         verify(publicador).publicar(comando);
     }
 
-    /** Una orden del usuario registrado. */
     private static CrearOrdenRequest orden(String simbolo, Lado lado, TipoOrden tipo, Long precio, int cantidad) {
-        return new CrearOrdenRequest(REGISTRADO.toString(), simbolo, lado, tipo, precio, cantidad);
+        return new CrearOrdenRequest(simbolo, lado, tipo, precio, cantidad);
     }
 }

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Prueba de punta a punta, todo a través del gateway (puerto 8080): levanta Kafka y PostgreSQL, arranca
 # auth-service, order-service, matching-engine y el gateway, registra un usuario (y comprueba que llega a
-# users.registered y a order-service), inicia sesión, comprueba que sin token se recibe 401 y que una orden
-# de un usuario desconocido recibe 422, envía con el token una venta y una compra que se cruzan y comprueba
-# que el motor registra la ejecución a su nombre. Por último renueva el token y comprueba que, después de
-# cerrar sesión, el token de refresco ya no sirve.
+# users.registered y a order-service), inicia sesión, comprueba que sin token se recibe 401 (también
+# llamando directo a order-service) y que una orden con usuarioId en el cuerpo recibe 400, envía con el
+# token una venta y una compra que se cruzan y comprueba que el motor registra la ejecución a nombre del
+# usuario del token. Por último renueva el token y comprueba que, después de cerrar sesión, el token de
+# refresco ya no sirve.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
 # (la prueba arranca los suyos en los puertos 8080, 8081 y 8082).
@@ -17,6 +18,7 @@ LOGS=target/integracion
 mkdir -p "$LOGS"
 JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
 GATEWAY=http://localhost:8080
+ORDER_SERVICE=http://localhost:8081
 
 for puerto in 8080 8081 8082; do
     if curl -s -o /dev/null "http://localhost:$puerto"; then
@@ -118,22 +120,25 @@ comprobar "Login con contraseña equivocada" \
 echo "   Login 200, consulta con token 200 y contraseña equivocada 401"
 
 echo "5. Comprobando las órdenes rechazadas..."
-ORDEN_DESCONOCIDO='{"usuarioId":"00000000-0000-0000-0000-000000000000","simbolo":"TEST","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":10}'
-comprobar "Orden sin token" "$(pedir POST /api/ordenes "$ORDEN_DESCONOCIDO")" 401
-comprobar "Orden con un token alterado" "$(pedir POST /api/ordenes "$ORDEN_DESCONOCIDO" "${TOKEN}x")" 401
-comprobar "Orden de un usuario que no existe" "$(pedir POST /api/ordenes "$ORDEN_DESCONOCIDO" "$TOKEN")" 422
-echo "   Sin token 401, token alterado 401 y usuario desconocido 422"
+ORDEN='{"simbolo":"TEST","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":10}'
+comprobar "Orden sin token" "$(pedir POST /api/ordenes "$ORDEN")" 401
+comprobar "Orden con un token alterado" "$(pedir POST /api/ordenes "$ORDEN" "${TOKEN}x")" 401
+comprobar "Orden a nombre de otro usuario" "$(pedir POST /api/ordenes \
+    '{"usuarioId":"00000000-0000-0000-0000-000000000000","simbolo":"TEST","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":10}' \
+    "$TOKEN")" 400
+# Saltándose el gateway: order-service valida el token por su cuenta
+comprobar "Orden directa a order-service sin token" "$(GATEWAY=$ORDER_SERVICE pedir POST /api/ordenes "$ORDEN")" 401
+comprobar "Orden directa a order-service con un token alterado" \
+    "$(GATEWAY=$ORDER_SERVICE pedir POST /api/ordenes "$ORDEN" "${TOKEN}x")" 401
+echo "   Sin token 401, token alterado 401 y usuarioId en el cuerpo 400; directo a order-service también 401"
 
 echo "6. Enviando con el token una venta y una compra de TEST a 5000..."
-comprobar "Venta" "$(pedir POST /api/ordenes \
-    "{\"usuarioId\":\"$ID\",\"simbolo\":\"TEST\",\"lado\":\"VENTA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":10}" \
-    "$TOKEN")" 202
-comprobar "Compra" "$(pedir POST /api/ordenes \
-    "{\"usuarioId\":\"$ID\",\"simbolo\":\"TEST\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":10}" \
-    "$TOKEN")" 202
+comprobar "Venta" "$(pedir POST /api/ordenes "${ORDEN/COMPRA/VENTA}" "$TOKEN")" 202
+comprobar "Compra" "$(pedir POST /api/ordenes "$ORDEN" "$TOKEN")" 202
 
+# El motor anota el usuario de cada orden: el id del registro solo puede venir del "sub" del token
 esperar "Ejecución: 10 acciones de TEST a 5000 COP .*($ID)" "$LOGS/matching-engine.log" 30
-echo "   El motor ejecutó las órdenes"
+echo "   El motor ejecutó las órdenes a nombre del usuario del token"
 
 echo "7. Renovando el token y cerrando sesión..."
 comprobar "Renovar el token" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200

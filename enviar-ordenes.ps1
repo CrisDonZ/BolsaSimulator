@@ -1,6 +1,6 @@
 ﻿# Envía varias órdenes de prueba a través del gateway (puerto 8080).
 # Inicia sesión con tu correo y contraseña (los del registro en POST /api/usuarios) y envía cada orden
-# con el token de acceso; el id del usuario sale del mismo token, así no tienes que copiarlo.
+# con el token de acceso. Las órdenes no llevan el id del usuario: order-service lo toma del token.
 #
 #   $yo = @{ Correo = "cris@correo.com"; Contrasena = "secreta123" }
 #   .\enviar-ordenes.ps1 @yo                                             -> 3 compras de ANDX y 3 de CAFE a 5000
@@ -41,14 +41,6 @@ function Get-MotivoRechazo($errorRegistro) {
     try { return ($cuerpo | ConvertFrom-Json).detail } catch { return $cuerpo }
 }
 
-# El token es un JWT: la parte del medio es JSON en Base64 URL y su campo "sub" es el id del usuario
-function Get-UsuarioDelToken($token) {
-    $datos = $token.Split(".")[1].Replace("-", "+").Replace("_", "/")
-    $datos += "=" * ((4 - $datos.Length % 4) % 4)
-    $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($datos))
-    return ($json | ConvertFrom-Json).sub
-}
-
 try {
     $sesion = Invoke-RestMethod -Method Post -Uri "$gateway/api/auth/login" -ContentType "application/json" `
         -Body (@{ correo = $Correo; contrasena = $Contrasena } | ConvertTo-Json)
@@ -56,14 +48,12 @@ try {
     Write-Host "No se pudo iniciar sesión: $(Get-MotivoRechazo $_)" -ForegroundColor Red
     exit 1
 }
-$usuarioId = Get-UsuarioDelToken $sesion.tokenAcceso
 $cabeceras = @{ Authorization = "Bearer $($sesion.tokenAcceso)" }
-Write-Host "Sesión iniciada como $Correo (usuario $usuarioId)"
+Write-Host "Sesión iniciada como $Correo"
 
 foreach ($simbolo in $Simbolos) {
     for ($i = 1; $i -le $Veces; $i++) {
         $orden = @{
-            usuarioId = $usuarioId
             simbolo   = $simbolo
             lado      = $Lado
             tipo      = $Tipo
