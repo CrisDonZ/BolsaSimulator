@@ -32,7 +32,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 class ServicioUsuariosTest {
 
     private final RepositorioUsuarios repositorio = mock(RepositorioUsuarios.class);
-    private final PasswordEncoder cifrador = new ConfiguracionSeguridad().cifradorContrasenas();
+    private final PasswordEncoder cifrador = new ConfiguracionContrasenas().cifradorContrasenas();
     private final PublicadorUsuarios publicador = mock(PublicadorUsuarios.class);
     private final ServicioUsuarios servicio = new ServicioUsuarios(repositorio, cifrador, publicador);
 

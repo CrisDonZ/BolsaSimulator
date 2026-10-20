@@ -6,7 +6,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 @Configuration
-public class ConfiguracionSeguridad {
+public class ConfiguracionContrasenas {
 
     /** BCrypt con factor 10: cada hash tarda ~0,1 s, caro para quien intente adivinar contraseñas (RNF-21). */
     @Bean

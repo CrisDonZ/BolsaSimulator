@@ -26,6 +26,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.testcontainers.junit.jupiter.Container;
@@ -62,7 +63,7 @@ class RegistroUsuariosIntegracionTest {
     private RepositorioUsuarios repositorio;
 
     @Test
-    void unUsuarioRegistradoQuedaGuardadoYSePuedeConsultarPorSuId() throws Exception {
+    void unUsuarioRegistradoQuedaGuardadoYConsultaSuPerfilConSuToken() throws Exception {
         String respuesta = mvc.perform(post("/api/usuarios").contentType(MediaType.APPLICATION_JSON).content("""
                         {"nombre":"Beto Ruiz","alias":"beto","correo":"beto@correo.com",
                          "contrasena":"secreta123","aceptaPoliticaDatos":true}
@@ -70,8 +71,15 @@ class RegistroUsuariosIntegracionTest {
                 .andExpect(status().isCreated())
                 .andReturn().getResponse().getContentAsString();
         String id = respuesta.replaceAll(".*\"id\":\"([^\"]+)\".*", "$1");
+        String token = mvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"correo\":\"beto@correo.com\",\"contrasena\":\"secreta123\"}"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString()
+                .replaceAll(".*\"tokenAcceso\":\"([^\"]+)\".*", "$1");
 
         mvc.perform(get("/api/usuarios/{id}", id))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/usuarios/{id}", id).header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.alias").value("beto"));
         assertThat(repositorio.existsByCorreo("beto@correo.com")).isTrue();

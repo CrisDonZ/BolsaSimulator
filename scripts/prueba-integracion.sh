@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Prueba de punta a punta, todo a través del gateway (puerto 8080): levanta Kafka y PostgreSQL, arranca
 # auth-service, order-service, matching-engine y el gateway, registra un usuario (y comprueba que llega a
-# users.registered y a order-service), inicia sesión, comprueba que sin token se recibe 401 (también
-# llamando directo a order-service) y que una orden con usuarioId en el cuerpo recibe 400, envía con el
+# users.registered y a order-service), inicia sesión, comprueba que el perfil de otro usuario responde 404,
+# que sin token se recibe 401 (también llamando directo a auth-service y order-service, sin el gateway)
+# y que una orden con usuarioId en el cuerpo recibe 400, envía con el
 # token una venta y una compra que se cruzan y comprueba que el motor registra la ejecución a nombre del
 # usuario del token. Por último renueva el token y comprueba que, después de cerrar sesión, el token de
 # refresco ya no sirve.
@@ -19,6 +20,7 @@ mkdir -p "$LOGS"
 JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
 GATEWAY=http://localhost:8080
 ORDER_SERVICE=http://localhost:8081
+AUTH_SERVICE=http://localhost:8082
 
 for puerto in 8080 8081 8082; do
     if curl -s -o /dev/null "http://localhost:$puerto"; then
@@ -119,6 +121,19 @@ comprobar "Login con contraseña equivocada" \
     "$(pedir POST /api/auth/login "{\"correo\":\"$CORREO\",\"contrasena\":\"equivocada\"}")" 401
 echo "   Login 200, consulta con token 200 y contraseña equivocada 401"
 
+echo "   Comprobando que nadie ve el perfil de otro..."
+comprobar "Registro de un segundo usuario" "$(pedir POST /api/usuarios "{\"nombre\":\"Otro usuario\",\"alias\":\"otro_$SUFIJO\",
+    \"correo\":\"otro_$SUFIJO@bolsasim.co\",\"contrasena\":\"secreta123\",\"aceptaPoliticaDatos\":true}")" 201
+OTRO=$(campo id)
+comprobar "Perfil de otro usuario" "$(pedir GET "/api/usuarios/$OTRO" "" "$TOKEN")" 404
+# Saltándose el gateway: auth-service valida el token por su cuenta
+comprobar "Perfil directo a auth-service sin token" "$(GATEWAY=$AUTH_SERVICE pedir GET "/api/usuarios/$ID")" 401
+comprobar "Perfil directo a auth-service con un token alterado" \
+    "$(GATEWAY=$AUTH_SERVICE pedir GET "/api/usuarios/$ID" "" "${TOKEN}x")" 401
+# Un error de Spring en una ruta pública debe seguir siendo 400, no 401
+comprobar "Registro que no es JSON, directo a auth-service" "$(GATEWAY=$AUTH_SERVICE pedir POST /api/usuarios "{no es json")" 400
+echo "   Perfil de otro 404; directo a auth-service sin token o alterado 401; registro mal formado 400"
+
 echo "5. Comprobando las órdenes rechazadas..."
 ORDEN='{"simbolo":"TEST","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":10}'
 comprobar "Orden sin token" "$(pedir POST /api/ordenes "$ORDEN")" 401
@@ -143,6 +158,8 @@ echo "   El motor ejecutó las órdenes a nombre del usuario del token"
 echo "7. Renovando el token y cerrando sesión..."
 comprobar "Renovar el token" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200
 comprobar "Cerrar sesión sin token" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
+comprobar "Cerrar sesión directo a auth-service sin token" \
+    "$(GATEWAY=$AUTH_SERVICE pedir POST /api/auth/logout "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 comprobar "Cerrar sesión" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"$REFRESCO\"}" "$TOKEN")" 204
 comprobar "Renovar después de cerrar sesión" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 echo "   Refresco 200, logout sin token 401, logout 204 y refresco revocado 401"

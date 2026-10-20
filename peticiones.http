@@ -55,7 +55,7 @@ Content-Type: application/json
   "contrasena": "equivocada"
 }
 
-### 5. Consultar tu usuario (necesita token)
+### 5. Consultar tu usuario (necesita token). Con el id de otro usuario responde 404, como si no existiera.
 GET {{gateway}}/api/usuarios/{{usuarioId}}
 Authorization: Bearer {{token}}
 

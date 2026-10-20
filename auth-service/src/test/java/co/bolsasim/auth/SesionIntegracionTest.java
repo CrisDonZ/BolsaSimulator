@@ -17,6 +17,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -28,7 +29,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * Prueba de integración del inicio de sesión (HU-02) contra un PostgreSQL real en un contenedor (RNF-36):
- * Flyway crea token_refresco, el login entrega tokens de verdad y cerrar sesión invalida el de refresco.
+ * Flyway crea token_refresco, el login entrega tokens de verdad, cerrar sesión invalida el de refresco y
+ * nadie puede cerrar la sesión ni ver el perfil de otro usuario (RNF-23).
  * No necesita Kafka: el usuario se guarda directo en la base, sin pasar por el registro.
  *
  * <p>Necesita Docker. Si Docker está cerrado, la prueba se salta en vez de fallar.
@@ -92,19 +94,46 @@ class SesionIntegracionTest {
 
     @Test
     void elRefrescoFuncionaHastaQueSeCierraLaSesion() throws Exception {
-        String refresco = login("fer@correo.com", "secreta123")
-                .replaceAll(".*\"tokenRefresco\":\"([^\"]+)\".*", "$1");
-        String cuerpo = "{\"tokenRefresco\":\"" + refresco + "\"}";
+        String sesion = login("fer@correo.com", "secreta123");
+        String cuerpo = "{\"tokenRefresco\":\"" + campo(sesion, "tokenRefresco") + "\"}";
 
         mvc.perform(post("/api/auth/refresh").contentType(MediaType.APPLICATION_JSON).content(cuerpo))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.tokenAcceso").isNotEmpty());
 
         mvc.perform(post("/api/auth/logout").contentType(MediaType.APPLICATION_JSON).content(cuerpo))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/auth/logout").contentType(MediaType.APPLICATION_JSON).content(cuerpo)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + campo(sesion, "tokenAcceso")))
                 .andExpect(status().isNoContent());
 
         mvc.perform(post("/api/auth/refresh").contentType(MediaType.APPLICATION_JSON).content(cuerpo))
                 .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void nadieCierraLaSesionNiVeElPerfilDeOtroUsuario() throws Exception {
+        usuarios.findByCorreo("gabi@correo.com").orElseGet(() -> usuarios.saveAndFlush(
+                Usuario.nuevoInversionista("Gabi Díaz", "gabi", "gabi@correo.com", cifrador.encode("secreta123"),
+                        Instant.now())));
+        String deFer = login("fer@correo.com", "secreta123");
+        String accesoDeGabi = campo(login("gabi@correo.com", "secreta123"), "tokenAcceso");
+        String refrescoDeFer = "{\"tokenRefresco\":\"" + campo(deFer, "tokenRefresco") + "\"}";
+
+        // Gabi tiene el token de refresco de Fer e intenta cerrar su sesión: 204, pero no se revoca
+        mvc.perform(post("/api/auth/logout").contentType(MediaType.APPLICATION_JSON).content(refrescoDeFer)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accesoDeGabi))
+                .andExpect(status().isNoContent());
+        mvc.perform(post("/api/auth/refresh").contentType(MediaType.APPLICATION_JSON).content(refrescoDeFer))
+                .andExpect(status().isOk());
+
+        // Y el perfil de Fer responde 404 a Gabi, como si no existiera; a Fer, 200
+        mvc.perform(get("/api/usuarios/{id}", fer.getId()).header(HttpHeaders.AUTHORIZATION, "Bearer " + accesoDeGabi))
+                .andExpect(status().isNotFound());
+        mvc.perform(get("/api/usuarios/{id}", fer.getId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + campo(deFer, "tokenAcceso")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.alias").value("fer"));
     }
 
     @Test
@@ -115,6 +144,10 @@ class SesionIntegracionTest {
         assertThat(tokens.findAll())
                 .isNotEmpty()
                 .noneMatch(token -> token.getTokenHash().equals(refresco));
+    }
+
+    private static String campo(String json, String nombre) {
+        return json.replaceAll(".*\"" + nombre + "\":\"([^\"]+)\".*", "$1");
     }
 
     private String login(String correo, String contrasena) throws Exception {
