@@ -52,8 +52,13 @@ services:
       - |
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \
           --topic orders.commands --partitions 6 --replication-factor 1
+        # Sin vencimiento (retention.ms=-1): un registro es un hecho que cualquier servicio nuevo necesita leer
+        # desde el principio (portfolio-service abre así las cuentas). RNF-15 fija 7 días solo para órdenes y
+        # operaciones. El --alter lo aplica también si el tópico ya existía
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \
-          --topic users.registered --partitions 6 --replication-factor 1
+          --topic users.registered --partitions 6 --replication-factor 1 --config retention.ms=-1
+        /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:19092 --alter --entity-type topics \
+          --entity-name users.registered --add-config retention.ms=-1
         # Lo que publica el motor: cambios de estado de las órdenes y operaciones (clave = símbolo).
         # Guardan 7 días de mensajes, el valor por defecto (RNF-15)
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \

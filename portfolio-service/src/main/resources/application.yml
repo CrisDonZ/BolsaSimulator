@@ -1,0 +1,42 @@
+server:
+  port: 8084
+
+bolsasim:
+  servicios:
+    auth: ${AUTH_SERVICE_URL:http://localhost:8082}
+  jwt:
+    # Clave pública con la que se verifica la firma de los tokens. Se descarga en la primera petición
+    # y queda en caché, así portfolio-service arranca aunque auth-service todavía no esté listo.
+    jwk-set-uri: ${bolsasim.servicios.auth}/.well-known/jwks.json
+    emisor: bolsasim-auth
+  cuenta:
+    # Dinero con el que empieza cada cuenta, en COP (RF-07)
+    saldo-inicial: ${SALDO_INICIAL:10000000}
+
+spring:
+  application:
+    name: portfolio-service
+  datasource:
+    # Base "portafolio" del PostgreSQL de docker-compose.yml (puerto 5433 en tu computador).
+    # Los valores por defecto sirven solo en desarrollo; en otro entorno van en variables de entorno.
+    url: ${PORTAFOLIO_DB_URL:jdbc:postgresql://localhost:5433/portafolio}
+    username: ${PORTAFOLIO_DB_USUARIO:bolsasim}
+    password: ${PORTAFOLIO_DB_CLAVE:bolsasim}
+  kafka:
+    # Dirección de Kafka vista desde tu computador (ver docker-compose.yml)
+    bootstrap-servers: localhost:9092
+    consumer:
+      # Lee users.registered para abrir la cuenta de cada usuario
+      group-id: portfolio-service
+      # Si el grupo es nuevo, lee el tópico desde el principio: así abre las cuentas de los usuarios que ya
+      # estaban registrados
+      auto-offset-reset: earliest
+      # Solo lee mensajes de transacciones confirmadas
+      isolation-level: read-committed
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # ErrorHandlingDeserializer evita que un mensaje mal formado bloquee al consumidor
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        "[spring.deserializer.value.delegate.class]": org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+        # Solo se aceptan clases de este paquete al convertir el JSON (seguridad)
+        "[spring.json.trusted.packages]": co.bolsasim.eventos

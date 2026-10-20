@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prueba de punta a punta, todo a través del gateway (puerto 8080): levanta Kafka y PostgreSQL, arranca
-# auth-service (con un ADMIN nuevo), order-service, market-data-service, matching-engine y el gateway,
+# auth-service (con un ADMIN nuevo), order-service, market-data-service, portfolio-service, matching-engine y el gateway,
 # registra un usuario (y comprueba que llega a users.registered y a order-service), inicia sesión,
 # comprueba que el perfil de otro usuario responde 404, que sin token se recibe 401 (también llamando
 # directo a auth-service, order-service y market-data-service, sin el gateway) y que una orden con
@@ -13,7 +13,7 @@
 # cerrar sesión, el token de refresco ya no sirve.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
-# (la prueba arranca los suyos en los puertos 8080 a 8083).
+# (la prueba arranca los suyos en los puertos 8080 a 8084).
 #
 #   bash scripts/prueba-integracion.sh
 set -euo pipefail
@@ -26,10 +26,11 @@ GATEWAY=http://localhost:8080
 ORDER_SERVICE=http://localhost:8081
 AUTH_SERVICE=http://localhost:8082
 MARKET_DATA_SERVICE=http://localhost:8083
+PORTFOLIO_SERVICE=http://localhost:8084
 
-for puerto in 8080 8081 8082 8083; do
+for puerto in 8080 8081 8082 8083 8084; do
     if curl -s -o /dev/null "http://localhost:$puerto"; then
-        echo "El puerto $puerto está ocupado: detén el gateway, order-service, auth-service y market-data-service antes de correr la prueba."
+        echo "El puerto $puerto está ocupado: detén el gateway y los servicios antes de correr la prueba."
         exit 1
     fi
 done
@@ -90,14 +91,16 @@ campo() {
 echo "1. Levantando Kafka y PostgreSQL..."
 docker compose up -d --wait kafka postgres
 docker compose up --exit-code-from kafka-init kafka-init > /dev/null
-# init.sql solo corre la primera vez que arranca PostgreSQL: un contenedor de antes no tiene la base "mercado"
-if ! docker exec bolsasim-postgres psql -U bolsasim -d postgres -tAc \
-        "SELECT 1 FROM pg_database WHERE datname = 'mercado'" | grep -q 1; then
-    docker exec bolsasim-postgres createdb -U bolsasim mercado
-    echo "   Base \"mercado\" creada"
-fi
+# init.sql solo corre la primera vez que arranca PostgreSQL: un contenedor de antes no tiene las bases nuevas
+for base in mercado portafolio; do
+    if ! docker exec bolsasim-postgres psql -U bolsasim -d postgres -tAc \
+            "SELECT 1 FROM pg_database WHERE datname = '$base'" | grep -q 1; then
+        docker exec bolsasim-postgres createdb -U bolsasim "$base"
+        echo "   Base \"$base\" creada"
+    fi
+done
 
-echo "2. Arrancando auth-service, market-data-service, matching-engine, order-service y el gateway..."
+echo "2. Arrancando auth-service, market-data-service, portfolio-service, matching-engine, order-service y el gateway..."
 # Alias y correos distintos en cada corrida: PostgreSQL conserva los usuarios mientras el contenedor exista.
 # El ADMIN se crea al arrancar auth-service, con una contraseña aleatoria que no queda en ninguna parte.
 SUFIJO=$(date +%s)
@@ -108,17 +111,20 @@ BOLSASIM_ADMIN_CORREO="$CORREO_ADMIN" BOLSASIM_ADMIN_CONTRASENA="$CLAVE_ADMIN" B
 USUARIOS=$!
 "$JAVA" -jar market-data-service/target/market-data-service-*[0-9T].jar > "$LOGS/market-data-service.log" 2>&1 &
 MERCADO=$!
+"$JAVA" -jar portfolio-service/target/portfolio-service-*[0-9T].jar > "$LOGS/portfolio-service.log" 2>&1 &
+CUENTAS=$!
 "$JAVA" -jar matching-engine/target/matching-engine-*[0-9T].jar > "$LOGS/matching-engine.log" 2>&1 &
 MOTOR=$!
 "$JAVA" -jar order-service/target/order-service-*[0-9T].jar > "$LOGS/order-service.log" 2>&1 &
 ORDENES=$!
 "$JAVA" -jar gateway/target/gateway-*[0-9T].jar > "$LOGS/gateway.log" 2>&1 &
 ENTRADA=$!
-trap 'kill $USUARIOS $MERCADO $MOTOR $ORDENES $ENTRADA 2>/dev/null || true' EXIT
+trap 'kill $USUARIOS $MERCADO $CUENTAS $MOTOR $ORDENES $ENTRADA 2>/dev/null || true' EXIT
 
 esperar "Started AuthServiceApplication" "$LOGS/auth-service.log" 60
 esperar "Administrador admin_$SUFIJO creado" "$LOGS/auth-service.log" 30
 esperar "Started MarketDataServiceApplication" "$LOGS/market-data-service.log" 60
+esperar "Started PortfolioServiceApplication" "$LOGS/portfolio-service.log" 60
 esperar "Started OrderServiceApplication" "$LOGS/order-service.log" 60
 esperar "Started GatewayApplication" "$LOGS/gateway.log" 60
 esperar "partitions assigned" "$LOGS/matching-engine.log" 60
@@ -146,6 +152,8 @@ echo "   Evento UsuarioRegistrado publicado en users.registered"
 # order-service guarda el usuario en su copia local de forma asíncrona: hay que esperarlo
 esperar "Usuario $ID guardado en la copia local" "$LOGS/order-service.log" 30
 echo "   order-service ya conoce al usuario"
+esperar "Cuenta del usuario $ID abierta con 10000000 COP" "$LOGS/portfolio-service.log" 30
+echo "   portfolio-service le abrió la cuenta con 10.000.000 COP"
 
 echo "4. Iniciando sesión..."
 comprobar "Login" "$(pedir POST /api/auth/login "{\"correo\":\"$CORREO\",\"contrasena\":\"secreta123\"}")" 200
@@ -155,6 +163,15 @@ comprobar "Consultar el usuario con el token" "$(pedir GET "/api/usuarios/$ID" "
 comprobar "Login con contraseña equivocada" \
     "$(pedir POST /api/auth/login "{\"correo\":\"$CORREO\",\"contrasena\":\"equivocada\"}")" 401
 echo "   Login 200, consulta con token 200 y contraseña equivocada 401"
+
+echo "   Consultando la cuenta..."
+comprobar "Saldo de la cuenta" "$(pedir GET /api/cuenta "" "$TOKEN")" 200
+grep -q '"saldoDisponible":10000000,"saldoReservado":0,"saldoTotal":10000000' "$LOGS/respuesta.json"
+comprobar "Movimientos de la cuenta" "$(pedir GET "/api/cuenta/movimientos?tipo=SALDO_INICIAL" "" "$TOKEN")" 200
+grep -q '"tipo":"SALDO_INICIAL","monto":10000000' "$LOGS/respuesta.json"
+comprobar "Movimientos con un tipo que no existe" "$(pedir GET "/api/cuenta/movimientos?tipo=REGALO" "" "$TOKEN")" 400
+comprobar "Cuenta directo a portfolio-service sin token" "$(GATEWAY=$PORTFOLIO_SERVICE pedir GET /api/cuenta)" 401
+echo "   Saldo 10.000.000 (disponible) y 0 reservado; movimiento SALDO_INICIAL; tipo inválido 400; sin token 401"
 
 echo "   Comprobando que nadie ve el perfil de otro..."
 comprobar "Registro de un segundo usuario" "$(pedir POST /api/usuarios "{\"nombre\":\"Otro usuario\",\"alias\":\"otro_$SUFIJO\",
@@ -172,6 +189,7 @@ echo "   Perfil de otro 404; directo a auth-service sin token o alterado 401; re
 echo "5. El ADMIN crea un instrumento con todo corriendo..."
 comprobar "Login del ADMIN" "$(pedir POST /api/auth/login "{\"correo\":\"$CORREO_ADMIN\",\"contrasena\":\"$CLAVE_ADMIN\"}")" 200
 TOKEN_ADMIN=$(campo tokenAcceso)
+comprobar "Cuenta del ADMIN" "$(pedir GET /api/cuenta "" "$TOKEN_ADMIN")" 404
 # Un símbolo de 5 letras al azar en cada corrida: la base conserva los instrumentos de corridas anteriores
 LETRAS=ABCDEFGHIJKLMNOPQRSTUVWXYZ
 SIMBOLO=""

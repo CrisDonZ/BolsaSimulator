@@ -51,6 +51,7 @@ class GatewaySeguridadTest {
         propiedades.add("bolsasim.servicios.auth", SERVICIOS::url);
         propiedades.add("bolsasim.servicios.ordenes", SERVICIOS::url);
         propiedades.add("bolsasim.servicios.mercado", SERVICIOS::url);
+        propiedades.add("bolsasim.servicios.cuenta", SERVICIOS::url);
     }
 
     @Value("${local.server.port}")
@@ -176,7 +177,9 @@ class GatewaySeguridadTest {
             "GET,  /api/usuarios/123e4567-e89b-12d3-a456-426614174000",
             "GET,  /api/ordenes",
             "GET,  /api/instrumentos",
-            "POST, /api/instrumentos/ANDX/suspender"})
+            "POST, /api/instrumentos/ANDX/suspender",
+            "GET,  /api/cuenta",
+            "GET,  /api/cuenta/movimientos"})
     void lasDemasRutasDeLosServiciosExigenToken(String metodo, String ruta) {
         cliente.method(HttpMethod.valueOf(metodo)).uri(ruta)
                 .exchange()

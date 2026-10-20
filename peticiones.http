@@ -359,3 +359,21 @@ Content-Type: application/json
   "tipo": "MERCADO",
   "cantidad": 10
 }
+
+### 35. Tu cuenta (HU-12): saldo disponible, reservado y total, en COP. Arranca con 10.000.000; si tu cuenta
+###     todavía no existía, esta consulta la abre. Un ADMIN recibe 404: no tiene cuenta de inversión.
+GET {{gateway}}/api/cuenta
+Authorization: Bearer {{token}}
+
+### 36. Tus movimientos de dinero, del más reciente al más viejo. Por ahora solo SALDO_INICIAL; las reservas,
+###     compras y ventas llegan con HU-05. Si hay más, pega "siguiente" en el parámetro despues.
+GET {{gateway}}/api/cuenta/movimientos?tamano=20
+Authorization: Bearer {{token}}
+
+### 37. Filtrados por tipo y por fechas (días en hora de Colombia, los dos incluidos)
+GET {{gateway}}/api/cuenta/movimientos?tipo=SALDO_INICIAL&desde=2026-10-01&hasta=2026-10-31
+Authorization: Bearer {{token}}
+
+### 38. Error a propósito: un tipo que no existe -> 400 con la lista de tipos válidos
+GET {{gateway}}/api/cuenta/movimientos?tipo=REGALO
+Authorization: Bearer {{token}}
