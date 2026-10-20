@@ -45,10 +45,13 @@ spring:
         "[request.timeout.ms]": 5000
         "[max.block.ms]": 5000
     consumer:
-      # Lee users.registered para saber qué usuarios existen
+      # Lee users.registered (qué usuarios existen), instruments.events (qué instrumentos se negocian) y
+      # orders.events (qué pasó con cada orden en el motor)
       group-id: order-service
       # Si el grupo es nuevo, lee el tópico desde el principio: así conoce a los usuarios ya registrados
       auto-offset-reset: earliest
+      # Solo lee eventos de transacciones confirmadas: si el motor aborta una (RNF-10), sus eventos no llegan
+      isolation-level: read-committed
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       # ErrorHandlingDeserializer evita que un mensaje mal formado bloquee al consumidor
       value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer

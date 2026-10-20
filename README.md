@@ -1,6 +1,6 @@
 # BolsaSim — proyecto inicial
 
-Simulador de bolsa: el **gateway** es la única entrada y exige un token válido; **auth-service** registra a los usuarios y les abre sesión con tokens JWT; **market-data-service** guarda el catálogo de instrumentos, que el administrador crea, edita y suspende; **order-service** recibe las órdenes por REST, acepta solo las de instrumentos activos, las guarda y las publica en Kafka con el patrón outbox, y deja que cada usuario consulte las suyas; **matching-engine** las lee y las cruza en el libro de órdenes de su símbolo. Por ahora las ejecuciones solo se muestran en el log.
+Simulador de bolsa: el **gateway** es la única entrada y exige un token válido; **auth-service** registra a los usuarios y les abre sesión con tokens JWT; **market-data-service** guarda el catálogo de instrumentos, que el administrador crea, edita y suspende; **order-service** recibe las órdenes por REST, acepta solo las de instrumentos activos, las guarda y las publica en Kafka con el patrón outbox, y deja que cada usuario consulte las suyas; **matching-engine** las lee, las cruza en el libro de órdenes de su símbolo y publica lo que pasó: cada cambio de estado de una orden en `orders.events` y cada operación en `trades.executed`. order-service lee `orders.events` y actualiza cada orden con su estado, cantidad ejecutada y precio promedio.
 
 Piensa en Kafka como un buzón con 6 casilleros (particiones). order-service deja cada orden en el casillero de su símbolo y el motor las recoge en el mismo orden en que llegaron.
 
@@ -19,18 +19,24 @@ Postman / curl ──▶ gateway                            (puerto 8082) ──
                             Authorization)                                     │ publicador del outbox (cada 100 ms)
                                                                                ▼
                                                                          Kafka: orders.commands ──▶ matching-engine
-                                                                         (6 particiones,            (log: "Orden recibida")
-                                                                          clave = símbolo)
+                                                                         (6 particiones,            (libro en memoria, transacciones
+                                                                          clave = símbolo)           de Kafka: comando y eventos juntos)
+                                                                                                          │
+                                       order-service actualiza ◀── Kafka: orders.events ◀──────────────────┤
+                                       estado, cantidad ejecutada      (estado de cada orden)              │
+                                       y precio promedio                                                   ▼
+                                                                    Kafka: trades.executed (cada operación;
+                                                                    lo usará portfolio-service)
 ```
 
 ## Estructura
 
 | Carpeta | Qué contiene |
 | --- | --- |
-| `eventos/` | Java puro, sin Spring: los eventos `ComandoOrden`, `UsuarioRegistrado` e `InstrumentoActualizado`, los enums y los nombres de tópicos. Lo comparten todos los servicios. |
-| `order-service/` | API REST `POST /api/ordenes` y la consulta de tus órdenes (`GET /api/ordenes`, paginada por cursor, y `GET /api/ordenes/{id}`, HU-09). Guarda cada orden en la tabla ORDEN y su comando en OUTBOX en la misma transacción; un publicador lo envía a Kafka cada 100 ms, así ningún comando se pierde si Kafka está caído (RNF-12). Con el header `Idempotency-Key`, una orden enviada dos veces se crea una sola vez (HU-10). Vuelve a validar el JWT con la clave pública de auth-service y toma el usuario de la orden del token (`sub`), no del cuerpo. Escucha `users.registered` y `instruments.events` y guarda en su base una copia de los usuarios (tabla `usuario_registrado`) y de los instrumentos (tabla `instrumento`): acepta solo órdenes de usuarios registrados y de instrumentos activos. |
+| `eventos/` | Java puro, sin Spring: los eventos `ComandoOrden`, `UsuarioRegistrado`, `InstrumentoActualizado`, `EventoOrden` y `OperacionEjecutada`, los enums (como `EstadoOrden`) y los nombres de tópicos. Lo comparten todos los servicios. |
+| `order-service/` | API REST `POST /api/ordenes` y la consulta de tus órdenes (`GET /api/ordenes`, paginada por cursor, y `GET /api/ordenes/{id}`, HU-09). Guarda cada orden en la tabla ORDEN y su comando en OUTBOX en la misma transacción; un publicador lo envía a Kafka cada 100 ms, así ningún comando se pierde si Kafka está caído (RNF-12). Con el header `Idempotency-Key`, una orden enviada dos veces se crea una sola vez (HU-10). Vuelve a validar el JWT con la clave pública de auth-service y toma el usuario de la orden del token (`sub`), no del cuerpo. Escucha `users.registered` y `instruments.events` y guarda en su base una copia de los usuarios (tabla `usuario_registrado`) y de los instrumentos (tabla `instrumento`): acepta solo órdenes de usuarios registrados y de instrumentos activos. Escucha `orders.events` y actualiza cada orden; guarda cada ejecución en la tabla `ejecucion` y cada evento aplicado en `evento_procesado`, así un evento repetido no se aplica dos veces (RNF-09). |
 | `market-data-service/` | Por ahora, solo el catálogo de instrumentos (HU-22): `GET /api/instrumentos` para cualquier usuario con token, y crear, editar, suspender y reactivar solo para el rol `ADMIN`. Guarda la tabla INSTRUMENTO en PostgreSQL con Flyway, arranca con 10 instrumentos ficticios y publica cada cambio en `instruments.events`. Valida el JWT por su cuenta. El último precio y las velas llegarán en el sprint 4. |
-| `matching-engine/` | El consumidor de Kafka y el libro de órdenes (`libro/`, Java puro con pruebas JUnit). |
+| `matching-engine/` | El libro de órdenes (`libro/`, Java puro con pruebas JUnit) y su consumidor de Kafka. Por cada comando publica `EventoOrden` en `orders.events` y `OperacionEjecutada` en `trades.executed`, dentro de una transacción de Kafka junto con el offset del comando (RNF-10). Reconoce un comando repetido y reenvía lo mismo sin tocar el libro (RNF-09). |
 | `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. Vuelve a validar el JWT en las rutas protegidas: cada usuario solo consulta su propio perfil y solo cierra sus propias sesiones. Al arrancar crea el primer `ADMIN` con las variables `BOLSASIM_ADMIN_CORREO` y `BOLSASIM_ADMIN_CONTRASENA`. |
 | `gateway/` | Spring Cloud Gateway (WebFlux) en el puerto 8080: enruta a auth-service, order-service y market-data-service y exige un JWT válido, verificado con la clave pública de auth-service, salvo para registrarse, iniciar sesión, renovar el token y leer la clave. Reenvía el token original sin cambiarlo. |
 | `docker-compose.yml` | Kafka (modo KRaft), creación de tópicos, Kafka UI y PostgreSQL. |
@@ -56,7 +62,7 @@ En PowerShell los comandos son `.\mvnw.cmd ...`; en Git Bash, macOS o Linux, `./
 docker compose up -d
 ```
 
-Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bolsasim-postgres` deben decir *healthy*. Abre http://localhost:8090 para ver Kafka UI; en *Topics* deben aparecer `orders.commands`, `users.registered` e `instruments.events`, cada uno con 6 particiones. `instruments.events` es compactado: Kafka conserva siempre el último mensaje de cada símbolo, así un servicio nuevo lee el catálogo completo desde el principio.
+Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bolsasim-postgres` deben decir *healthy*. Abre http://localhost:8090 para ver Kafka UI; en *Topics* deben aparecer `orders.commands`, `orders.events`, `trades.executed`, `users.registered` e `instruments.events`, cada uno con 6 particiones. Si tu Kafka ya estaba arriba, `docker compose up -d` vuelve a correr `kafka-init` y crea los que falten. `instruments.events` es compactado: Kafka conserva siempre el último mensaje de cada símbolo, así un servicio nuevo lee el catálogo completo desde el principio.
 
 Si tu contenedor de PostgreSQL es de antes de market-data-service, no tiene la base `mercado` (`init.sql` solo corre la primera vez). Créala sin borrar nada: `docker exec bolsasim-postgres createdb -U bolsasim mercado`.
 
@@ -66,7 +72,7 @@ Si tu contenedor de PostgreSQL es de antes de market-data-service, no tiene la b
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 241 pruebas pasadas: 83 de order-service, 14 del libro de órdenes, 83 de auth-service, 42 de market-data-service y 19 del gateway. Las de integración de auth-service, order-service y market-data-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 279 pruebas pasadas: 99 de order-service, 36 de matching-engine, 83 de auth-service, 42 de market-data-service y 19 del gateway. Las de integración usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -208,8 +214,9 @@ O con `enviar-ordenes.ps1`, que inicia sesión por ti: `.\enviar-ordenes.ps1 -Co
 - **Si el usuario del token todavía no está en order-service:** `422 Unprocessable Content` con el motivo, y la orden no se publica. order-service conoce a los usuarios por el tópico `users.registered`, así que justo después de registrarte puede tardar unos milisegundos en aceptarte.
 - **Si el instrumento no existe o está suspendido:** `422` con "El instrumento NADA no existe." o "El instrumento ANDX está suspendido: no recibe órdenes nuevas.", y la orden no se publica.
 - **Log de order-service:** `Evento ... del outbox publicado en orders.commands (clave ANDX, partición 2, offset 0)`, unos 100 ms después de la respuesta.
-- **Log de matching-engine:** `Orden recibida: NUEVA COMPRA 100 acciones de ANDX a 5000 COP | partición 2, offset 0`.
-- **Kafka UI:** en *Topics → orders.commands → Messages* aparece el mensaje en JSON.
+- **Log de matching-engine:** `Orden recibida: NUEVA COMPRA 100 acciones de ANDX a 5000 COP | partición 2, offset 0` y después `Libro ANDX | mejor compra 5000 | mejor venta - | 1 mensajes publicados`.
+- **Log de order-service:** `Orden ... ahora está ABIERTA (0 de 100 ejecutadas, precio promedio null)`, cuando llega su evento de `orders.events`.
+- **Kafka UI:** en *Topics → orders.commands → Messages* aparece el comando en JSON, y en `orders.events` lo que pasó con la orden.
 
 El número de partición puede ser otro; lo importante es lo que muestran los experimentos.
 
@@ -231,10 +238,20 @@ Un doble clic en Comprar, o una app que reintenta porque se cayó la red, enviar
 
 ## Tus órdenes
 
-Cada orden queda guardada con su estado. Por ahora todas quedan `PENDIENTE`: los estados `ABIERTA`, `PARCIAL` y `EJECUTADA` llegarán cuando el motor publique `orders.events`.
+Cada orden queda guardada con su estado, y se actualiza sola cuando el motor publica lo que pasó con ella en `orders.events`:
+
+| Estado | Qué significa | Cantidad ejecutada | Motivo |
+| --- | --- | --- | --- |
+| `PENDIENTE` | Guardada en order-service; el motor todavía no la procesa (unos milisegundos, o más si el motor está detenido) | 0 | — |
+| `ABIERTA` | Esperando en el libro, sin ejecutar | 0 | — |
+| `PARCIAL` | Esperando en el libro, con una parte ejecutada | parte | — |
+| `EJECUTADA` | Ejecutada completa | toda | — |
+| `CANCELADA` | Una orden a mercado a la que le faltó contraparte (RF-26), o retirada del libro | lo que alcanzó | "Se ejecutaron 60 de 100 acciones; el resto se canceló porque no había más órdenes de venta.", "No había órdenes de venta para ejecutarla." o "Cancelada por el usuario." |
+
+El **precio promedio** es Σ(precio × cantidad) / Σ(cantidad) de todas sus ejecuciones, con 4 decimales: comprar 40 a 4.900 y 60 a 5.000 da 4.960. Una orden a mercado ejecutada a medias queda `CANCELADA` pero con su cantidad ejecutada y su precio promedio: lo que se compró, se compró.
 
 ```powershell
-(Invoke-RestMethod -Uri "http://localhost:8080/api/ordenes?tamano=5" -Headers $auth).ordenes | Format-Table simbolo, lado, cantidad, estado, creadaEn
+(Invoke-RestMethod -Uri "http://localhost:8080/api/ordenes?tamano=5" -Headers $auth).ordenes | Format-Table simbolo, lado, cantidad, cantidadEjecutada, precioPromedio, estado
 ```
 
 - **Filtro:** `estado=ABIERTAS` trae las `ABIERTA` y `PARCIAL` (HU-09); también sirve un estado exacto (`PENDIENTE`, `EJECUTADA`, `CANCELADA`...). Sin `estado`, todas.
@@ -243,6 +260,13 @@ Cada orden queda guardada con su estado. Por ahora todas quedan `PENDIENTE`: los
 - **Índices:** uno para cada forma de la consulta (todas, un estado y las abiertas), con las columnas en el orden de la lista. Una prueba revisa con `EXPLAIN` que cada consulta usa el suyo sin ordenar en memoria, con 20.000 órdenes de un mismo usuario.
 
 **Si Kafka está caído** al enviar la orden, igual responde `202` y la orden queda guardada: su comando espera en la tabla `outbox` y sale en cuanto Kafka vuelve (el publicador lo reintenta cada 100 ms, y avisa en el log). Pruébalo con `docker compose stop kafka`, envía una orden y luego `docker compose start kafka`.
+
+**Nada se pierde ni se aplica dos veces entre el motor y order-service:**
+
+- **El motor procesa cada comando dentro de una transacción de Kafka** (RNF-10): los eventos de `orders.events` y `trades.executed` y la confirmación del comando quedan juntos. Si el motor se cae a mitad de camino, nadie ve esos eventos (los consumidores leen con `read_committed`) y el comando se vuelve a entregar.
+- **Un comando repetido no entra dos veces al libro.** Puede repetirse porque el outbox entrega al menos una vez, o porque se abortó una transacción. El motor recuerda los últimos 10.000 comandos y, si uno se repite, reenvía los mismos eventos con los mismos ids sin tocar el libro.
+- **order-service aplica cada evento una sola vez** (RNF-09): guarda su id en `evento_procesado` en la misma transacción que el cambio de la orden, y un evento repetido se ignora.
+- **Un evento imposible** (por ejemplo, uno que ejecutaría más acciones de las pedidas, o que cambia una orden ya terminada) no se aplica: queda un `ERROR` en el log de order-service y el consumo sigue con el siguiente.
 
 ## Dos experimentos para entender Kafka
 
@@ -273,6 +297,9 @@ Cada orden queda guardada con su estado. Por ahora todas quedan `PENDIENTE`: los
 | Envías una orden y no aparece una nueva, pero responde `202` | Reenviaste una clave que ya usaste con esa misma orden: recibes la original (mira el header `Idempotent-Replayed`) | Cambia la clave si de verdad quieres otra orden igual |
 | `400` con "despues no es válido" | El cursor se cortó o se modificó al copiarlo | Copia el valor de `siguiente` completo, sin cambiarlo, o empieza de nuevo sin `despues` |
 | Las órdenes no llegan al motor y el log de order-service dice "Kafka no confirmó" o "No se pudo enviar" | Kafka está caído | Las órdenes están a salvo en la tabla `outbox`: levanta Kafka (`docker compose up -d kafka`) y salen solas |
+| Las órdenes se quedan en `PENDIENTE` | matching-engine no está corriendo, o tu Kafka es de antes de `orders.events` | Arranca matching-engine; si el tópico no existe, `docker compose up -d` lo crea. Las órdenes esperan en Kafka y se procesan al volver |
+| Una orden quedó `ABIERTA` en order-service pero el motor no la cruza | Reiniciaste matching-engine: sus libros viven en memoria y empiezan vacíos | Es una limitación conocida hasta las instantáneas del libro (RNF-13, ver *Siguientes pasos*) |
+| `ERROR` "Evento ... no se aplica" en el log de order-service | El motor publicó un evento que no tiene sentido para esa orden | La orden queda como estaba; el mensaje dice por qué. Es un error del motor, no del usuario |
 | `400` con "usuarioId ya no se envía" | La orden trae el `usuarioId` en el cuerpo, como antes del token | Quítalo: el usuario sale del token |
 | `401` con "Falta el token de acceso" | La petición no trae el header `Authorization: Bearer ...` | Inicia sesión (`POST /api/auth/login`) y envía el `tokenAcceso` |
 | `401` con "no es válido o ya venció" | Pasaron los 15 minutos, o reiniciaste auth-service (en desarrollo genera claves nuevas al arrancar) | Renueva con `POST /api/auth/refresh` o inicia sesión de nuevo |
@@ -284,7 +311,7 @@ Cada símbolo tiene su libro con las compras y ventas que esperan contraparte. R
 - La compra que más paga y la venta que menos pide se atienden primero.
 - A igual precio, se atiende primero la orden que llegó antes.
 - El precio de la ejecución es el de la orden que ya estaba esperando.
-- LIMITE: lo que no se ejecuta queda en el libro. MERCADO: lo que sobra se descarta.
+- LIMITE: lo que no se ejecuta queda en el libro. MERCADO: lo que sobra se cancela y nunca queda en el libro (RF-26).
 
 Pruébalo con los servicios y el gateway corriendo y el correo y la contraseña de un usuario registrado:
 
@@ -294,13 +321,13 @@ $yo = @{ Correo = "cris@correo.com"; Contrasena = "secreta123" }
 .\enviar-ordenes.ps1 @yo -Simbolos ANDX -Lado COMPRA -Precio 5100 -Cantidad 150 -Veces 1
 ```
 
-En el log de matching-engine verás `Ejecución: 100 acciones de ANDX a 5000 COP ...` y después `Libro ANDX | mejor compra 5100 | mejor venta -`: las 50 acciones que faltaron quedaron esperando.
+En el log de matching-engine verás `Ejecución: 100 acciones de ANDX a 5000 COP ...` y después `Libro ANDX | mejor compra 5100 | mejor venta - | 3 mensajes publicados` (la operación y un evento por cada orden): las 50 acciones que faltaron quedaron esperando. Con `GET /api/ordenes` lo ves desde order-service: la venta `EJECUTADA` (100 de 100 a 5000) y la compra `PARCIAL` (100 de 150, precio promedio 5000).
 
 Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
 
 ## Prueba de integración
 
-Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cuatro servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria), registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, inicia sesión, comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se envían una venta y una compra de ese instrumento que se cruzan, y se revisa que sus comandos salgan del outbox y que el motor registre la ejecución a nombre del usuario del token. La compra se reenvía con la misma `Idempotency-Key` y se comprueba que a `orders.commands` llega un solo comando. Las dos órdenes se consultan por id y página por página con el cursor, y otro usuario recibe 404. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8083) y ten Docker abierto:
+Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cuatro servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria), registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, inicia sesión, comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se envían una venta y una compra de ese instrumento que se cruzan, y se revisa que sus comandos salgan del outbox y que el motor registre la ejecución a nombre del usuario del token. La compra se reenvía con la misma `Idempotency-Key` y se comprueba que a `orders.commands` llega un solo comando. Las dos órdenes quedan `EJECUTADA` con su precio promedio (lo publica el motor en `orders.events`), hay una sola operación de la compra en `trades.executed`, se recorren página por página con el cursor, y otro usuario recibe 404. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8083) y ten Docker abierto:
 
 ```bash
 ./mvnw -B verify
@@ -313,9 +340,11 @@ GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba d
 
 ## Siguientes pasos
 
-- **Estados de la orden:** que el motor publique `orders.events` (en libro, parcial, ejecutada, cancelada) y order-service actualice el estado, la cantidad ejecutada y el precio promedio. Junto con eso, que el motor ignore un `ordenId` que ya procesó (RNF-09): el outbox entrega cada comando al menos una vez, y si order-service se cae justo después de que Kafka confirma, el comando se reenvía.
+- **Instantáneas del libro (RNF-13):** los libros viven en memoria y se pierden al reiniciar el motor. Publicarlos en `orderbook.snapshots` (compactado) y reconstruirlos al arrancar desde la última instantánea y los comandos posteriores.
+- **Cancelar una orden (HU-08):** el motor ya cancela y publica `CANCELADA`; falta el endpoint en order-service que envía el comando CANCELAR.
+- **Liquidación (RF-30, HU-12):** portfolio-service consumirá `trades.executed` para mover el dinero y las acciones de cada operación.
+- **Banda de ±10 % de las órdenes a mercado (RF-26):** hoy una orden a mercado se ejecuta contra lo que haya; falta limitarla al ±10 % del último precio.
 - **Outbox en auth-service y market-data-service:** order-service ya lo usa. En auth-service, si Kafka está caído justo después de registrar a alguien, el evento se pierde. Con los instrumentos el daño es menor, porque market-data-service vuelve a publicar todo el catálogo cada vez que arranca.
 - **Acciones del bot creador de mercado (RF-59):** `instruments.events` ya lleva las acciones emitidas; falta que portfolio-service, cuando exista, se las asigne al bot al crear el instrumento.
 - **Precio de la orden (RF-16):** order-service ya guarda el tick de cada instrumento; falta rechazar precios que no sean múltiplo del tick o que estén a más de ±10 % del último precio.
 - **Límite de órdenes (RNF-24):** 20 órdenes por segundo por usuario en el gateway; el exceso recibe 429.
-- **Ejecuciones en Kafka:** publicarlas en `trades.executed` para que el portafolio de cada usuario se entere de sus compras y ventas.

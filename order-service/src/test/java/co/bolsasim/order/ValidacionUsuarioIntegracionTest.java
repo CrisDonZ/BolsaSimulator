@@ -9,7 +9,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import co.bolsasim.eventos.ComandoOrden;
+import co.bolsasim.eventos.EjecucionOrden;
 import co.bolsasim.eventos.EstadoInstrumento;
+import co.bolsasim.eventos.EstadoOrden;
+import co.bolsasim.eventos.EventoOrden;
 import co.bolsasim.eventos.InstrumentoActualizado;
 import co.bolsasim.eventos.Topicos;
 import co.bolsasim.eventos.UsuarioRegistrado;
@@ -155,6 +158,33 @@ class ValidacionUsuarioIntegracionTest {
     }
 
     @Test
+    void cuandoElMotorPublicaEnOrdersEventsLaOrdenQuedaConSuEstadoYPrecioPromedio() throws Exception {
+        publicarInstrumento("ANDX", EstadoInstrumento.ACTIVO);
+        UUID usuarioId = registrar();
+        String ordenId = enviarOrden(ORDEN, usuarioId)
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString()
+                .replaceAll(".*\"ordenId\":\"([^\"]+)\".*", "$1");
+        UUID orden = UUID.fromString(ordenId);
+
+        // Lo que publicaría el motor: entra al libro, se ejecutan 40 a 4.900 y luego 60 a 5.000
+        kafkaTemplate.send(Topicos.ORDERS_EVENTS, "ANDX", eventoDelMotor(orden, usuarioId, EstadoOrden.ABIERTA, 0, null));
+        kafkaTemplate.send(Topicos.ORDERS_EVENTS, "ANDX", eventoDelMotor(orden, usuarioId, EstadoOrden.PARCIAL, 40,
+                new EjecucionOrden(UUID.randomUUID(), 4_900, 40)));
+        kafkaTemplate.send(Topicos.ORDERS_EVENTS, "ANDX", eventoDelMotor(orden, usuarioId, EstadoOrden.EJECUTADA, 100,
+                new EjecucionOrden(UUID.randomUUID(), 5_000, 60)));
+
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> consultar("/api/ordenes/" + ordenId, usuarioId)
+                .andExpect(jsonPath("$.estado").value("EJECUTADA")));
+        // (40 × 4900 + 60 × 5000) / 100 = 4960
+        consultar("/api/ordenes/" + ordenId, usuarioId)
+                .andExpect(jsonPath("$.cantidadEjecutada").value(100))
+                .andExpect(jsonPath("$.precioPromedio").value(4960.0));
+        consultar("/api/ordenes?estado=EJECUTADA", usuarioId)
+                .andExpect(jsonPath("$.ordenes[0].id").value(ordenId));
+    }
+
+    @Test
     void sinTokenResponde401() throws Exception {
         mvc.perform(post("/api/ordenes").contentType(MediaType.APPLICATION_JSON).content(ORDEN))
                 .andExpect(status().isUnauthorized());
@@ -163,6 +193,12 @@ class ValidacionUsuarioIntegracionTest {
     @Test
     void unUsuarioQueNuncaSeRegistroRecibe422AunqueTengaUnTokenValido() throws Exception {
         enviarOrden(ORDEN, UUID.randomUUID()).andExpect(status().isUnprocessableContent());
+    }
+
+    private static EventoOrden eventoDelMotor(UUID ordenId, UUID usuarioId, EstadoOrden estado, int ejecutada,
+                                              EjecucionOrden ejecucion) {
+        return new EventoOrden(UUID.randomUUID(), ordenId, usuarioId.toString(), "ANDX", estado, 100, ejecutada,
+                ejecucion, null, Instant.now());
     }
 
     /** Publica un UsuarioRegistrado como auth-service y espera a que llegue a la copia local. */

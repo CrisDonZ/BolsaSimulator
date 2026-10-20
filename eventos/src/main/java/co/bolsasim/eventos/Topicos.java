@@ -9,6 +9,12 @@ public final class Topicos {
     /** Comandos NUEVA y CANCELAR que van al motor. Clave del mensaje = símbolo. */
     public static final String ORDERS_COMMANDS = "orders.commands";
 
+    /** Cambios de estado de las órdenes que publica el motor. Clave del mensaje = símbolo. */
+    public static final String ORDERS_EVENTS = "orders.events";
+
+    /** Operaciones (una compra y una venta que se cruzaron) que publica el motor. Clave del mensaje = símbolo. */
+    public static final String TRADES_EXECUTED = "trades.executed";
+
     /** Usuarios recién registrados en auth-service. Clave del mensaje = id del usuario. */
     public static final String USERS_REGISTERED = "users.registered";
 

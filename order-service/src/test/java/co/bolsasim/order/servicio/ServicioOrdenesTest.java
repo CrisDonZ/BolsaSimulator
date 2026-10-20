@@ -21,7 +21,7 @@ import co.bolsasim.order.instrumento.Instrumento;
 import co.bolsasim.order.instrumento.RepositorioInstrumentos;
 import co.bolsasim.order.orden.ConsultaOrdenes;
 import co.bolsasim.order.orden.Cursor;
-import co.bolsasim.order.orden.EstadoOrden;
+import co.bolsasim.eventos.EstadoOrden;
 import co.bolsasim.order.orden.FiltroEstado;
 import co.bolsasim.order.orden.Orden;
 import co.bolsasim.order.orden.RepositorioOrdenes;

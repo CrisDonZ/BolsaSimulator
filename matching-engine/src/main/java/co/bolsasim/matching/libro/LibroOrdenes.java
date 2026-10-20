@@ -43,18 +43,15 @@ public class LibroOrdenes {
         this.simbolo = simbolo;
     }
 
-    /** Aplica un comando y devuelve las ejecuciones que produjo (vacía si no hubo cruce). */
-    public List<Ejecucion> procesar(ComandoOrden comando) {
+    /** Aplica un comando y devuelve las ejecuciones que produjo (vacía si no hubo cruce) y cómo terminó. */
+    public ResultadoComando procesar(ComandoOrden comando) {
         if (!simbolo.equals(comando.simbolo())) {
             throw new IllegalArgumentException(
                     "El libro de " + simbolo + " recibió una orden de " + comando.simbolo());
         }
         return switch (comando.accion()) {
             case NUEVA -> agregar(comando);
-            case CANCELAR -> {
-                cancelar(comando.ordenId());
-                yield List.of();
-            }
+            case CANCELAR -> cancelar(comando.ordenId());
         };
     }
 
@@ -78,7 +75,7 @@ public class LibroOrdenes {
         return orden == null ? 0 : orden.pendiente;
     }
 
-    private List<Ejecucion> agregar(ComandoOrden comando) {
+    private ResultadoComando agregar(ComandoOrden comando) {
         TreeMap<Long, ArrayDeque<OrdenEnLibro>> contraparte = comando.lado() == Lado.COMPRA ? ventas : compras;
         List<Ejecucion> ejecuciones = new ArrayList<>();
         int pendiente = comando.cantidad();
@@ -93,9 +90,9 @@ public class LibroOrdenes {
             OrdenEnLibro enEspera = fila.peekFirst();
             int cantidad = Math.min(pendiente, enEspera.pendiente);
 
-            ejecuciones.add(ejecucion(comando, enEspera, mejorPrecio, cantidad));
             pendiente -= cantidad;
             enEspera.pendiente -= cantidad;
+            ejecuciones.add(ejecucion(comando, comando.cantidad() - pendiente, enEspera, mejorPrecio, cantidad));
 
             if (enEspera.pendiente == 0) {
                 fila.pollFirst();
@@ -106,10 +103,17 @@ public class LibroOrdenes {
             }
         }
 
-        if (pendiente > 0 && comando.tipo() == TipoOrden.LIMITE) {
+        ResultadoComando.Desenlace desenlace;
+        if (pendiente == 0) {
+            desenlace = ResultadoComando.Desenlace.EJECUTADA;
+        } else if (comando.tipo() == TipoOrden.LIMITE) {
             dejarEnLibro(comando, pendiente);
+            desenlace = ResultadoComando.Desenlace.EN_LIBRO;
+        } else {
+            // RF-26: lo que no se ejecuta de una orden a mercado se cancela; nunca queda en el libro
+            desenlace = ResultadoComando.Desenlace.SOBRANTE_CANCELADO;
         }
-        return ejecuciones;
+        return new ResultadoComando(List.copyOf(ejecuciones), desenlace, null);
     }
 
     /** ¿La orden nueva acepta el precio de la contraparte? Una orden a MERCADO acepta cualquiera. */
@@ -122,27 +126,31 @@ public class LibroOrdenes {
                 : comando.precioLimite() <= precioContraparte;
     }
 
-    private Ejecucion ejecucion(ComandoOrden nueva, OrdenEnLibro enEspera, long precio, int cantidad) {
+    /** @param ejecutadaNueva lo ejecutado de la orden nueva, contando esta ejecución */
+    private Ejecucion ejecucion(ComandoOrden nueva, int ejecutadaNueva, OrdenEnLibro enEspera, long precio,
+                                int cantidad) {
         if (nueva.lado() == Lado.COMPRA) {
             return new Ejecucion(simbolo, precio, cantidad,
-                    nueva.ordenId(), nueva.usuarioId(), enEspera.ordenId, enEspera.usuarioId);
+                    nueva.ordenId(), nueva.usuarioId(), nueva.cantidad(), ejecutadaNueva,
+                    enEspera.ordenId, enEspera.usuarioId, enEspera.cantidad, enEspera.ejecutada());
         }
         return new Ejecucion(simbolo, precio, cantidad,
-                enEspera.ordenId, enEspera.usuarioId, nueva.ordenId(), nueva.usuarioId());
+                enEspera.ordenId, enEspera.usuarioId, enEspera.cantidad, enEspera.ejecutada(),
+                nueva.ordenId(), nueva.usuarioId(), nueva.cantidad(), ejecutadaNueva);
     }
 
     private void dejarEnLibro(ComandoOrden comando, int pendiente) {
         var orden = new OrdenEnLibro(comando.ordenId(), comando.usuarioId(), comando.lado(),
-                comando.precioLimite(), pendiente);
+                comando.precioLimite(), comando.cantidad(), pendiente);
         ladoDe(orden.lado).computeIfAbsent(orden.precio, precio -> new ArrayDeque<>()).addLast(orden);
         porId.put(orden.ordenId, orden);
     }
 
-    /** Retira una orden del libro. Si ya se ejecutó completa o no existe, no hace nada. */
-    private void cancelar(UUID ordenId) {
+    /** Retira una orden del libro. Si ya se ejecutó completa o no existe, no cambia nada. */
+    private ResultadoComando cancelar(UUID ordenId) {
         OrdenEnLibro orden = porId.remove(ordenId);
         if (orden == null) {
-            return;
+            return new ResultadoComando(List.of(), ResultadoComando.Desenlace.SIN_CAMBIOS, null);
         }
         TreeMap<Long, ArrayDeque<OrdenEnLibro>> lado = ladoDe(orden.lado);
         ArrayDeque<OrdenEnLibro> fila = lado.get(orden.precio);
@@ -150,6 +158,8 @@ public class LibroOrdenes {
         if (fila.isEmpty()) {
             lado.remove(orden.precio);
         }
+        return new ResultadoComando(List.of(), ResultadoComando.Desenlace.CANCELADA,
+                new ResultadoComando.OrdenCancelada(orden.ordenId, orden.usuarioId, orden.cantidad, orden.ejecutada()));
     }
 
     private TreeMap<Long, ArrayDeque<OrdenEnLibro>> ladoDe(Lado lado) {

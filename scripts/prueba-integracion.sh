@@ -246,8 +246,28 @@ fi
 echo "   Compra repetida con la misma clave: 202 con la misma orden y un solo comando; otra orden con esa clave 422; sin clave 400"
 
 echo "   Consultando las órdenes guardadas..."
-comprobar "Consultar la compra" "$(pedir GET "/api/ordenes/$COMPRA" "" "$TOKEN")" 200
-grep -q '"estado":"PENDIENTE"' "$LOGS/respuesta.json"
+# El motor publica en orders.events y order-service actualiza cada orden de forma asíncrona: hay que esperarlo
+for orden in "$COMPRA" "$VENTA"; do
+    for _ in $(seq 1 30); do
+        comprobar "Consultar la orden $orden" "$(pedir GET "/api/ordenes/$orden" "" "$TOKEN")" 200
+        grep -q '"estado":"EJECUTADA"' "$LOGS/respuesta.json" && break
+        sleep 1
+    done
+    if ! grep -q '"cantidadEjecutada":10,"precioPromedio":5000.*"estado":"EJECUTADA"' "$LOGS/respuesta.json"; then
+        echo "La orden $orden no quedó EJECUTADA con 10 acciones a 5000:"
+        cat "$LOGS/respuesta.json"
+        exit 1
+    fi
+done
+# Una sola operación de la compra en trades.executed, aunque se envió dos veces
+OPERACIONES=$(MSYS_NO_PATHCONV=1 docker exec bolsasim-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+    --bootstrap-server localhost:9092 --topic trades.executed --from-beginning --timeout-ms 10000 \
+    --isolation-level read_committed 2> /dev/null | grep -c "$COMPRA" || true)
+if [ "$OPERACIONES" != 1 ]; then
+    echo "La compra aparece en $OPERACIONES operaciones de trades.executed, no en 1"
+    exit 1
+fi
+echo "   La venta y la compra quedaron EJECUTADA, 10 acciones a 5000; una sola operación en trades.executed"
 # Una por página: la más reciente (la compra) primero, y el cursor lleva a la venta
 comprobar "Primera página de una orden" "$(pedir GET "/api/ordenes?tamano=1" "" "$TOKEN")" 200
 grep -q "\"id\":\"$COMPRA\"" "$LOGS/respuesta.json"
@@ -259,7 +279,7 @@ comprobar "Login del segundo usuario" "$(pedir POST /api/auth/login "{\"correo\"
 TOKEN_OTRO=$(campo tokenAcceso)
 comprobar "La orden de otro usuario" "$(pedir GET "/api/ordenes/$COMPRA" "" "$TOKEN_OTRO")" 404
 comprobar "Consultar órdenes directo a order-service sin token" "$(GATEWAY=$ORDER_SERVICE pedir GET /api/ordenes)" 401
-echo "   Por id 200 (PENDIENTE), paginación con cursor 200, página de 101 400, orden de otro 404, sin token 401"
+echo "   Paginación con cursor 200, página de 101 400, orden de otro 404, sin token 401"
 
 echo "8. Renovando el token y cerrando sesión..."
 comprobar "Renovar el token" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200
