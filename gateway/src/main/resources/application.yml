@@ -8,6 +8,7 @@ bolsasim:
     auth: ${AUTH_SERVICE_URL:http://localhost:8082}
     ordenes: ${ORDER_SERVICE_URL:http://localhost:8081}
     mercado: ${MARKET_DATA_SERVICE_URL:http://localhost:8083}
+    cuenta: ${PORTFOLIO_SERVICE_URL:http://localhost:8084}
   jwt:
     # Clave pública con la que auth-service firma los tokens (se descarga una vez y se guarda en memoria)
     jwk-set-uri: ${bolsasim.servicios.auth}/.well-known/jwks.json
@@ -35,6 +36,10 @@ spring:
               uri: ${bolsasim.servicios.mercado}
               predicates:
                 - Path=/api/instrumentos/**
+            - id: portfolio-service
+              uri: ${bolsasim.servicios.cuenta}
+              predicates:
+                - Path=/api/cuenta/**
 
 logging:
   level:

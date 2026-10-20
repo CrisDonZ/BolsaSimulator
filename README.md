@@ -1,14 +1,16 @@
 # BolsaSim — proyecto inicial
 
-Simulador de bolsa: el **gateway** es la única entrada y exige un token válido; **auth-service** registra a los usuarios y les abre sesión con tokens JWT; **market-data-service** guarda el catálogo de instrumentos, que el administrador crea, edita y suspende; **order-service** recibe las órdenes por REST, acepta solo las de instrumentos activos, las guarda y las publica en Kafka con el patrón outbox, y deja que cada usuario consulte las suyas; **matching-engine** las lee, las cruza en el libro de órdenes de su símbolo y publica lo que pasó: cada cambio de estado de una orden en `orders.events` y cada operación en `trades.executed`. order-service lee `orders.events` y actualiza cada orden con su estado, cantidad ejecutada y precio promedio.
+Simulador de bolsa: el **gateway** es la única entrada y exige un token válido; **auth-service** registra a los usuarios y les abre sesión con tokens JWT; **market-data-service** guarda el catálogo de instrumentos, que el administrador crea, edita y suspende; **order-service** recibe las órdenes por REST, acepta solo las de instrumentos activos, las guarda y las publica en Kafka con el patrón outbox, y deja que cada usuario consulte las suyas; **matching-engine** las lee, las cruza en el libro de órdenes de su símbolo y publica lo que pasó: cada cambio de estado de una orden en `orders.events` y cada operación en `trades.executed`. order-service lee `orders.events` y actualiza cada orden con su estado, cantidad ejecutada y precio promedio. **portfolio-service** abre la cuenta de cada usuario con su saldo inicial y le muestra su saldo y sus movimientos de dinero.
 
 Piensa en Kafka como un buzón con 6 casilleros (particiones). order-service deja cada orden en el casillero de su símbolo y el motor las recoge en el mismo orden en que llegaron.
 
 ```
                          ┌─/api/usuarios, /api/auth──▶ auth-service ──▶ PostgreSQL (base "auth")
 Postman / curl ──▶ gateway                            (puerto 8082) ──▶ Kafka: users.registered
-               (puerto 8080)                                             (clave = id del usuario)
-       valida el JWT (RNF-22)
+               (puerto 8080)                                             (clave = id del usuario, sin vencimiento)
+       valida el JWT (RNF-22)                                                   │ abre la cuenta con 10.000.000 COP
+                         ├─/api/cuenta──────────────▶ portfolio-service ◀───────┘
+                         │                            (puerto 8084) ──▶ PostgreSQL (base "portafolio")
                          ├─/api/instrumentos────────▶ market-data-service ──▶ PostgreSQL (base "mercado")
                          │                            (puerto 8083)       ──▶ Kafka: instruments.events
                          │                                                    (compactado, clave = símbolo)
@@ -36,9 +38,10 @@ Postman / curl ──▶ gateway                            (puerto 8082) ──
 | `eventos/` | Java puro, sin Spring: los eventos `ComandoOrden`, `UsuarioRegistrado`, `InstrumentoActualizado`, `EventoOrden` y `OperacionEjecutada`, los enums (como `EstadoOrden`) y los nombres de tópicos. Lo comparten todos los servicios. |
 | `order-service/` | API REST `POST /api/ordenes` y la consulta de tus órdenes (`GET /api/ordenes`, paginada por cursor, y `GET /api/ordenes/{id}`, HU-09). Guarda cada orden en la tabla ORDEN y su comando en OUTBOX en la misma transacción; un publicador lo envía a Kafka cada 100 ms, así ningún comando se pierde si Kafka está caído (RNF-12). Con el header `Idempotency-Key`, una orden enviada dos veces se crea una sola vez (HU-10). Vuelve a validar el JWT con la clave pública de auth-service y toma el usuario de la orden del token (`sub`), no del cuerpo. Escucha `users.registered` y `instruments.events` y guarda en su base una copia de los usuarios (tabla `usuario_registrado`) y de los instrumentos (tabla `instrumento`): acepta solo órdenes de usuarios registrados y de instrumentos activos. Escucha `orders.events` y actualiza cada orden; guarda cada ejecución en la tabla `ejecucion` y cada evento aplicado en `evento_procesado`, así un evento repetido no se aplica dos veces (RNF-09). |
 | `market-data-service/` | Por ahora, solo el catálogo de instrumentos (HU-22): `GET /api/instrumentos` para cualquier usuario con token, y crear, editar, suspender y reactivar solo para el rol `ADMIN`. Guarda la tabla INSTRUMENTO en PostgreSQL con Flyway, arranca con 10 instrumentos ficticios y publica cada cambio en `instruments.events`. Valida el JWT por su cuenta. El último precio y las velas llegarán en el sprint 4. |
+| `portfolio-service/` | Por ahora, la cuenta de cada usuario (HU-12): `GET /api/cuenta` (saldo disponible, reservado y total) y `GET /api/cuenta/movimientos` (filtrado por tipo y por fechas, paginado por cursor). Guarda las tablas CUENTA y MOVIMIENTO en PostgreSQL con Flyway; ningún saldo puede quedar negativo (CHECK en la base, RNF-07). Abre la cuenta con el saldo inicial al llegar `users.registered`, o la primera vez que el usuario la consulta si su evento no llegó. Valida el JWT por su cuenta. Las reservas, la liquidación y las posiciones llegan con HU-05 y HU-11. |
 | `matching-engine/` | El libro de órdenes (`libro/`, Java puro con pruebas JUnit) y su consumidor de Kafka. Por cada comando publica `EventoOrden` en `orders.events` y `OperacionEjecutada` en `trades.executed`, dentro de una transacción de Kafka junto con el offset del comando (RNF-10). Reconoce un comando repetido y reenvía lo mismo sin tocar el libro (RNF-09). |
 | `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. Vuelve a validar el JWT en las rutas protegidas: cada usuario solo consulta su propio perfil y solo cierra sus propias sesiones. Al arrancar crea el primer `ADMIN` con las variables `BOLSASIM_ADMIN_CORREO` y `BOLSASIM_ADMIN_CONTRASENA`. |
-| `gateway/` | Spring Cloud Gateway (WebFlux) en el puerto 8080: enruta a auth-service, order-service y market-data-service y exige un JWT válido, verificado con la clave pública de auth-service, salvo para registrarse, iniciar sesión, renovar el token y leer la clave. Reenvía el token original sin cambiarlo. |
+| `gateway/` | Spring Cloud Gateway (WebFlux) en el puerto 8080: enruta a auth-service, order-service, market-data-service y portfolio-service y exige un JWT válido, verificado con la clave pública de auth-service, salvo para registrarse, iniciar sesión, renovar el token y leer la clave. Reenvía el token original sin cambiarlo. |
 | `docker-compose.yml` | Kafka (modo KRaft), creación de tópicos, Kafka UI y PostgreSQL. |
 | `postgres/init.sql` | Crea una base por servicio la primera vez que arranca PostgreSQL. |
 | `peticiones.http` | Registro, login, órdenes e instrumentos de ejemplo, listos para enviar desde IntelliJ o la extensión REST Client de VS Code. |
@@ -64,7 +67,9 @@ docker compose up -d
 
 Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bolsasim-postgres` deben decir *healthy*. Abre http://localhost:8090 para ver Kafka UI; en *Topics* deben aparecer `orders.commands`, `orders.events`, `trades.executed`, `users.registered` e `instruments.events`, cada uno con 6 particiones. Si tu Kafka ya estaba arriba, `docker compose up -d` vuelve a correr `kafka-init` y crea los que falten. `instruments.events` es compactado: Kafka conserva siempre el último mensaje de cada símbolo, así un servicio nuevo lee el catálogo completo desde el principio.
 
-Si tu contenedor de PostgreSQL es de antes de market-data-service, no tiene la base `mercado` (`init.sql` solo corre la primera vez). Créala sin borrar nada: `docker exec bolsasim-postgres createdb -U bolsasim mercado`.
+Si tu contenedor de PostgreSQL es de antes de market-data-service o de portfolio-service, no tiene las bases `mercado` o `portafolio` (`init.sql` solo corre la primera vez). Créalas sin borrar nada: `docker exec bolsasim-postgres createdb -U bolsasim mercado` (o `portafolio`).
+
+`users.registered` no vence (`retention.ms=-1`): un registro es un hecho que cualquier servicio nuevo necesita leer desde el principio. Los demás tópicos guardan 7 días (RNF-15). Si tu Kafka ya estaba arriba, `docker compose up -d` le aplica el cambio.
 
 **2. Compila todo y corre las pruebas:**
 
@@ -72,7 +77,7 @@ Si tu contenedor de PostgreSQL es de antes de market-data-service, no tiene la b
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 279 pruebas pasadas: 99 de order-service, 36 de matching-engine, 83 de auth-service, 42 de market-data-service y 19 del gateway. Las de integración usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 310 pruebas pasadas: 99 de order-service, 36 de matching-engine, 83 de auth-service, 42 de market-data-service, 29 de portfolio-service y 21 del gateway. Las de integración usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -96,15 +101,16 @@ $env:BOLSASIM_ADMIN_CONTRASENA = "una-contraseña-larga"
 
 En Git Bash: `BOLSASIM_ADMIN_CORREO=admin@bolsasim.co BOLSASIM_ADMIN_CONTRASENA=una-contraseña-larga ./mvnw -pl auth-service spring-boot:run`. El log dice `Administrador admin creado`. Solo se crea si nadie usa ese correo: una cuenta que ya existe nunca se vuelve ADMIN, y la contraseña de un ADMIN ya creado no cambia aunque cambies la variable. Sin las variables, auth-service arranca igual, sin administrador (lo avisa en el log). El alias es `admin`; para usar otro, define `BOLSASIM_ADMIN_ALIAS`.
 
-**6. Arranca market-data-service** (terminal 4):
+**6. Arranca market-data-service y portfolio-service** (terminales 4 y 5):
 
 ```bash
 ./mvnw -pl market-data-service spring-boot:run
+./mvnw -pl portfolio-service spring-boot:run
 ```
 
-Al arrancar publica los 10 instrumentos en `instruments.events`; en el log de order-service verás `Instrumento ANDX guardado en la copia local`.
+market-data-service publica al arrancar los 10 instrumentos en `instruments.events`; en el log de order-service verás `Instrumento ANDX guardado en la copia local`. portfolio-service lee `users.registered` desde el principio y abre la cuenta de cada usuario: verás `Cuenta del usuario ... abierta con 10000000 COP`.
 
-**7. Arranca el gateway** (terminal 5):
+**7. Arranca el gateway** (terminal 6):
 
 ```bash
 ./mvnw -pl gateway spring-boot:run
@@ -156,7 +162,9 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/auth/logout -Heade
 | `POST /api/ordenes` | Sí | `202` con el `ordenId` y el header `Location: /api/ordenes/{id}`. La orden queda guardada PENDIENTE aunque Kafka esté caído. Pide el header `Idempotency-Key` (`400` sin él); ver *Órdenes duplicadas* abajo. |
 | `GET /api/ordenes/{id}` | Sí | `200` con la orden: estado, cantidad ejecutada, precio promedio y fechas. La de otro usuario responde `404`, igual que una que no existe (RNF-23). |
 | `GET /api/ordenes?estado=…&tamano=…&despues=…` | Sí | `200` con `ordenes` (de la más reciente a la más vieja) y `siguiente`. Ver *Tus órdenes* abajo. |
-| Todas las rutas que piden token | Sí | Sin token, con el token vencido, con la firma alterada o de otro emisor: `401` del gateway, y la petición no llega al servicio. auth-service, order-service y market-data-service vuelven a validar el token: llamándolos directo al 8082, al 8081 o al 8083 también responden `401`. |
+| `GET /api/cuenta` | Sí | `200` con tu saldo disponible, reservado y total, y el saldo inicial. Si tu cuenta todavía no existía, esta consulta la abre. Un `ADMIN` recibe `404`: no tiene cuenta de inversión. Ver *Tu cuenta* abajo. |
+| `GET /api/cuenta/movimientos?tipo=…&desde=…&hasta=…&tamano=…&despues=…` | Sí | `200` con `movimientos` (del más reciente al más viejo) y `siguiente`. |
+| Todas las rutas que piden token | Sí | Sin token, con el token vencido, con la firma alterada o de otro emisor: `401` del gateway, y la petición no llega al servicio. Cada servicio vuelve a validar el token: llamándolos directo (8081 a 8084) también responden `401`. |
 
 El token de acceso lleva solo el id del usuario (`sub`) y su `rol`: nada de correo ni nombre, porque cualquiera que lo tenga puede leerlo. En la base solo se guarda el hash del token de refresco. El gateway no mira el `rol`: cada servicio decide qué puede hacer cada rol.
 
@@ -236,6 +244,21 @@ Un doble clic en Comprar, o una app que reintenta porque se cayó la red, enviar
 - **Una orden rechazada no gasta la clave:** si responde `400` o `422`, no se guardó nada; corrígela y reenvíala con la misma clave.
 - **Cómo se garantiza:** la clave se guarda en la orden, con un índice único `(usuario_id, clave_idempotencia)`. Antes de crear la orden se busca la clave; si dos solicitudes llegan a la vez, ninguna ve a la otra, y ahí decide el índice: PostgreSQL hace esperar a la segunda hasta que la primera confirma y entonces la rechaza, y order-service responde con la orden de la primera. Una prueba lo reproduce de forma exacta: deja la primera sin confirmar y comprueba que la segunda espera.
 
+## Tu cuenta
+
+Cada usuario recibe una cuenta con **10.000.000 COP** (RF-07; configurable con la variable `SALDO_INICIAL`). Se abre cuando portfolio-service lee su `users.registered`, o la primera vez que el usuario la consulta, si su evento todavía no llega o ya no está en Kafka (por ejemplo, porque se registró antes de que existiera portfolio-service). De las dos formas queda igual: una sola cuenta por usuario y un solo movimiento `SALDO_INICIAL`, aunque el evento y la consulta lleguen a la vez. Un ADMIN no tiene cuenta, porque no opera; los bots sí.
+
+```powershell
+Invoke-RestMethod -Uri http://localhost:8080/api/cuenta -Headers $auth
+(Invoke-RestMethod -Uri "http://localhost:8080/api/cuenta/movimientos?tamano=5" -Headers $auth).movimientos | Format-Table tipo, monto, simbolo, cantidad, creadoEn
+```
+
+- **Saldo:** `saldoDisponible` es lo que puedes usar, `saldoReservado` lo bloqueado en órdenes abiertas y `saldoTotal` la suma. Por ahora el reservado es 0: las reservas llegan con HU-05.
+- **Movimientos:** cada entrada o salida de dinero, con su monto (positivo entra, negativo sale), la acción y la cantidad si aplica, y la orden u operación de origen. Por ahora el único es `SALDO_INICIAL`; `RESERVA`, `LIBERACION`, `COMPRA` y `VENTA` llegan con HU-05.
+- **Filtros:** `tipo` (uno de los seis), `desde` y `hasta` (días `AAAA-MM-DD` en hora de Colombia, los dos incluidos completos). La paginación es la misma por cursor que la de las órdenes: `tamano` de 1 a 100, y `siguiente` va en `despues`.
+- **Nadie ve la cuenta de otro:** las rutas no llevan id; la cuenta siempre es la del token.
+- **Ningún saldo queda negativo:** además de las reglas del servicio, la base lo rechaza con un CHECK (RNF-07).
+
 ## Tus órdenes
 
 Cada orden queda guardada con su estado, y se actualiza sola cuando el motor publica lo que pasó con ella en `orders.events`:
@@ -283,7 +306,8 @@ El **precio promedio** es Σ(precio × cantidad) / Σ(cantidad) de todas sus eje
 | `Failed to install artifact co.bolsasim:eventos` | Un servicio corriendo tiene el jar bloqueado (Windows) | Detén los servicios y vuelve a compilar |
 | `release version 21 not supported` | Maven usa otro Java | Configura Java 21 en IntelliJ (*File → Project Structure → SDK*) |
 | auth-service, order-service o market-data-service: `Connection to localhost:5433 refused` | PostgreSQL no está arriba | `docker compose up -d postgres` y espera a *healthy* |
-| `database "ordenes" does not exist` o `database "mercado" does not exist` | Tu contenedor de PostgreSQL es de antes de que existiera esa base (`init.sql` solo corre la primera vez) | `docker exec bolsasim-postgres createdb -U bolsasim ordenes` (o `mercado`) |
+| `database "ordenes" does not exist` (o `mercado`, o `portafolio`) | Tu contenedor de PostgreSQL es de antes de que existiera esa base (`init.sql` solo corre la primera vez) | `docker exec bolsasim-postgres createdb -U bolsasim ordenes` (o `mercado`, o `portafolio`) |
+| `404` "Los administradores no tienen cuenta de inversión." | Consultaste `/api/cuenta` con el token del ADMIN | Usa el token de un inversionista |
 | `422` con "no está registrado" | order-service todavía no recibió el evento de `users.registered` de ese usuario | Espera unos segundos; si sigue, revisa que Kafka esté arriba y el log de order-service |
 | `422` con "El instrumento ... no existe" | El símbolo no está en el catálogo, o market-data-service no ha arrancado nunca (es quien publica los 10 iniciales) | Revisa `GET /api/instrumentos`; arranca market-data-service y espera `Instrumento ANDX guardado en la copia local` en el log de order-service |
 | `422` con "está suspendido" | Un ADMIN suspendió el instrumento | Que un ADMIN lo reactive con `POST /api/instrumentos/{simbolo}/reactivar` |
@@ -327,7 +351,7 @@ Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
 
 ## Prueba de integración
 
-Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cuatro servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria), registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, inicia sesión, comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se envían una venta y una compra de ese instrumento que se cruzan, y se revisa que sus comandos salgan del outbox y que el motor registre la ejecución a nombre del usuario del token. La compra se reenvía con la misma `Idempotency-Key` y se comprueba que a `orders.commands` llega un solo comando. Las dos órdenes quedan `EJECUTADA` con su precio promedio (lo publica el motor en `orders.events`), hay una sola operación de la compra en `trades.executed`, se recorren página por página con el cursor, y otro usuario recibe 404. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8083) y ten Docker abierto:
+Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cinco servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria), registra un usuario, comprueba que su evento llegue a `users.registered`, a order-service y a portfolio-service, inicia sesión, consulta su saldo de 10.000.000 y su movimiento `SALDO_INICIAL` (el ADMIN recibe 404), comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se envían una venta y una compra de ese instrumento que se cruzan, y se revisa que sus comandos salgan del outbox y que el motor registre la ejecución a nombre del usuario del token. La compra se reenvía con la misma `Idempotency-Key` y se comprueba que a `orders.commands` llega un solo comando. Las dos órdenes quedan `EJECUTADA` con su precio promedio (lo publica el motor en `orders.events`), hay una sola operación de la compra en `trades.executed`, se recorren página por página con el cursor, y otro usuario recibe 404. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8084) y ten Docker abierto:
 
 ```bash
 ./mvnw -B verify
@@ -342,7 +366,7 @@ GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba d
 
 - **Instantáneas del libro (RNF-13):** los libros viven en memoria y se pierden al reiniciar el motor. Publicarlos en `orderbook.snapshots` (compactado) y reconstruirlos al arrancar desde la última instantánea y los comandos posteriores.
 - **Cancelar una orden (HU-08):** el motor ya cancela y publica `CANCELADA`; falta el endpoint en order-service que envía el comando CANCELAR.
-- **Liquidación (RF-30, HU-12):** portfolio-service consumirá `trades.executed` para mover el dinero y las acciones de cada operación.
+- **Reservas y liquidación (HU-05, RF-17, RF-30):** la saga entre order-service y portfolio-service (`orders.requested`, `reservations.events`) que reserva el dinero o las acciones antes de enviar la orden al motor, y la liquidación de `trades.executed`. Con eso aparecen el saldo reservado, las posiciones y los movimientos de compra y venta.
 - **Banda de ±10 % de las órdenes a mercado (RF-26):** hoy una orden a mercado se ejecuta contra lo que haya; falta limitarla al ±10 % del último precio.
 - **Outbox en auth-service y market-data-service:** order-service ya lo usa. En auth-service, si Kafka está caído justo después de registrar a alguien, el evento se pierde. Con los instrumentos el daño es menor, porque market-data-service vuelve a publicar todo el catálogo cada vez que arranca.
 - **Acciones del bot creador de mercado (RF-59):** `instruments.events` ya lleva las acciones emitidas; falta que portfolio-service, cuando exista, se las asigne al bot al crear el instrumento.

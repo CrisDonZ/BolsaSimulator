@@ -3,3 +3,4 @@
 CREATE DATABASE auth;
 CREATE DATABASE ordenes;
 CREATE DATABASE mercado;
+CREATE DATABASE portafolio;
