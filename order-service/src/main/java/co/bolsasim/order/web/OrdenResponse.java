@@ -2,7 +2,7 @@ package co.bolsasim.order.web;
 
 import co.bolsasim.eventos.Lado;
 import co.bolsasim.eventos.TipoOrden;
-import co.bolsasim.order.orden.EstadoOrden;
+import co.bolsasim.eventos.EstadoOrden;
 import co.bolsasim.order.orden.Orden;
 import java.math.BigDecimal;
 import java.time.Instant;

@@ -1,6 +1,7 @@
 package co.bolsasim.order.orden;
 
 import co.bolsasim.eventos.ComandoOrden;
+import co.bolsasim.eventos.EstadoOrden;
 import co.bolsasim.eventos.Lado;
 import co.bolsasim.eventos.TipoOrden;
 import jakarta.persistence.Column;
@@ -101,6 +102,45 @@ public class Orden implements Persistable<UUID> {
      */
     public static Orden nueva(ComandoOrden comando, UUID usuarioId, String claveIdempotencia, Instant ahora) {
         return new Orden(comando, usuarioId, claveIdempotencia, ahora);
+    }
+
+    /**
+     * Aplica lo que el motor dice que pasó con la orden (orders.events). El evento trae el estado completo, no
+     * solo lo que cambió.
+     *
+     * @param precioPromedio calculado desde todas las ejecuciones de la orden; null si no tiene
+     * @throws EventoImposibleException si el evento no tiene sentido para esta orden: la orden ya terminó, la
+     *                                  cantidad no coincide, lo ejecutado retrocede o supera lo pedido (regla 8)
+     */
+    public void aplicar(EstadoOrden nuevoEstado, int cantidadDelEvento, int nuevaCantidadEjecutada,
+                        BigDecimal nuevoPrecioPromedio, String nuevoMotivo, Instant ahora) {
+        if (estado.terminado()) {
+            throw new EventoImposibleException("la orden ya terminó (" + estado + ")");
+        }
+        if (nuevoEstado == EstadoOrden.PENDIENTE || nuevoEstado == EstadoOrden.RECHAZADA) {
+            throw new EventoImposibleException("el motor no pasa una orden a " + nuevoEstado);
+        }
+        if (cantidadDelEvento != cantidad) {
+            throw new EventoImposibleException("el evento dice " + cantidadDelEvento + " acciones y la orden pide "
+                    + cantidad);
+        }
+        if (nuevaCantidadEjecutada > cantidad) {
+            throw new EventoImposibleException("se ejecutarían " + nuevaCantidadEjecutada + " de " + cantidad
+                    + " acciones");
+        }
+        if (nuevaCantidadEjecutada < cantidadEjecutada) {
+            throw new EventoImposibleException("lo ejecutado bajaría de " + cantidadEjecutada + " a "
+                    + nuevaCantidadEjecutada);
+        }
+        if (nuevoEstado == EstadoOrden.EJECUTADA && nuevaCantidadEjecutada != cantidad) {
+            throw new EventoImposibleException("EJECUTADA con " + nuevaCantidadEjecutada + " de " + cantidad
+                    + " acciones");
+        }
+        this.estado = nuevoEstado;
+        this.cantidadEjecutada = nuevaCantidadEjecutada;
+        this.precioPromedio = nuevoPrecioPromedio;
+        this.motivo = nuevoMotivo;
+        this.actualizadaEn = ahora;
     }
 
     /**

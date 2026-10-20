@@ -294,7 +294,8 @@ Authorization: Bearer {{token}}
 GET {{gateway}}/api/ordenes?tamano=20&despues={{siguiente}}
 Authorization: Bearer {{token}}
 
-### 29. Una orden por su id (el "ordenId" que devuelve la 6, o el header Location) -> 200.
+### 29. Una orden por su id (el "ordenId" que devuelve la 6, o el header Location) -> 200 con su estado: ABIERTA
+###     en el libro, PARCIAL o EJECUTADA según lo ejecutado, con su precio promedio. Lo actualiza el motor.
 ###     La de otro usuario responde 404, igual que una que no existe.
 GET {{gateway}}/api/ordenes/{{ordenId}}
 Authorization: Bearer {{token}}
@@ -329,4 +330,32 @@ Content-Type: application/json
   "tipo": "LIMITE",
   "precioLimite": 5000,
   "cantidad": 300
+}
+
+### 33. Venta a mercado de 40 ANDX: cruza con la compra de la 6 (100 a 5000). Después, la 29 muestra la compra
+###     PARCIAL, 40 de 100 ejecutadas a precio promedio 5000.
+POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-33-cambia-esta-clave
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "simbolo": "ANDX",
+  "lado": "VENTA",
+  "tipo": "MERCADO",
+  "cantidad": 40
+}
+
+### 34. Compra a mercado de un instrumento sin vendedores (TAYR, si nadie vende): el motor la cancela.
+###     Con la 26 la ves CANCELADA, 0 ejecutadas, motivo "No había órdenes de venta para ejecutarla."
+POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-34-cambia-esta-clave
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "simbolo": "TAYR",
+  "lado": "COMPRA",
+  "tipo": "MERCADO",
+  "cantidad": 10
 }

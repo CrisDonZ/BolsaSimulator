@@ -54,6 +54,12 @@ services:
           --topic orders.commands --partitions 6 --replication-factor 1
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \
           --topic users.registered --partitions 6 --replication-factor 1
+        # Lo que publica el motor: cambios de estado de las órdenes y operaciones (clave = símbolo).
+        # Guardan 7 días de mensajes, el valor por defecto (RNF-15)
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \
+          --topic orders.events --partitions 6 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \
+          --topic trades.executed --partitions 6 --replication-factor 1
         # Compactado: Kafka conserva para siempre el último mensaje de cada símbolo, así un servicio
         # nuevo lee el catálogo completo desde el principio sin recorrer todo el historial
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \

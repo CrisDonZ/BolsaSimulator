@@ -25,7 +25,7 @@ class LibroOrdenesTest {
     void ordenSinContraparteQuedaEsperandoEnElLibro() {
         ComandoOrden compra = compraLimite("ana", 5_000, 100);
 
-        List<Ejecucion> ejecuciones = libro.procesar(compra);
+        List<Ejecucion> ejecuciones = libro.procesar(compra).ejecuciones();
 
         assertThat(ejecuciones).isEmpty();
         assertThat(libro.mejorCompra()).contains(5_000L);
@@ -39,10 +39,10 @@ class LibroOrdenesTest {
         ComandoOrden compra = compraLimite("ana", 5_000, 100);
         libro.procesar(venta);
 
-        List<Ejecucion> ejecuciones = libro.procesar(compra);
+        List<Ejecucion> ejecuciones = libro.procesar(compra).ejecuciones();
 
         assertThat(ejecuciones).containsExactly(
-                new Ejecucion("ANDX", 5_000, 100, compra.ordenId(), "ana", venta.ordenId(), "beto"));
+                new Ejecucion("ANDX", 5_000, 100, compra.ordenId(), "ana", 100, 100, venta.ordenId(), "beto", 100, 100));
         assertThat(libro.mejorCompra()).isEmpty();
         assertThat(libro.mejorVenta()).isEmpty();
     }
@@ -52,7 +52,7 @@ class LibroOrdenesTest {
         libro.procesar(ventaLimite("beto", 4_900, 100));
 
         // Ana estaba dispuesta a pagar 5000, pero alguien ya vendía a 4900
-        List<Ejecucion> ejecuciones = libro.procesar(compraLimite("ana", 5_000, 100));
+        List<Ejecucion> ejecuciones = libro.procesar(compraLimite("ana", 5_000, 100)).ejecuciones();
 
         assertThat(ejecuciones).singleElement().extracting(Ejecucion::precio).isEqualTo(4_900L);
     }
@@ -62,7 +62,7 @@ class LibroOrdenesTest {
         libro.procesar(ventaLimite("beto", 5_000, 30));
         ComandoOrden compra = compraLimite("ana", 5_000, 100);
 
-        List<Ejecucion> ejecuciones = libro.procesar(compra);
+        List<Ejecucion> ejecuciones = libro.procesar(compra).ejecuciones();
 
         assertThat(ejecuciones).singleElement().extracting(Ejecucion::cantidad).isEqualTo(30);
         assertThat(libro.pendienteDe(compra.ordenId())).isEqualTo(70);
@@ -87,7 +87,7 @@ class LibroOrdenesTest {
         ComandoOrden ventaBarata = ventaLimite("beto", 5_000, 50);
         libro.procesar(ventaBarata);
 
-        List<Ejecucion> ejecuciones = libro.procesar(compraLimite("ana", 5_100, 50));
+        List<Ejecucion> ejecuciones = libro.procesar(compraLimite("ana", 5_100, 50)).ejecuciones();
 
         // La venta de 5000 llegó después, pero es más barata: va primero
         assertThat(ejecuciones).singleElement().satisfies(e -> {
@@ -104,7 +104,7 @@ class LibroOrdenesTest {
         libro.procesar(primera);
         libro.procesar(segunda);
 
-        List<Ejecucion> ejecuciones = libro.procesar(compraLimite("ana", 5_000, 50));
+        List<Ejecucion> ejecuciones = libro.procesar(compraLimite("ana", 5_000, 50)).ejecuciones();
 
         assertThat(ejecuciones).singleElement()
                 .extracting(Ejecucion::ordenVentaId).isEqualTo(primera.ordenId());
@@ -117,7 +117,7 @@ class LibroOrdenesTest {
         libro.procesar(ventaLimite("cara", 5_100, 30));
         libro.procesar(ventaLimite("dani", 5_200, 30));
 
-        List<Ejecucion> ejecuciones = libro.procesar(compraLimite("ana", 5_100, 100));
+        List<Ejecucion> ejecuciones = libro.procesar(compraLimite("ana", 5_100, 100)).ejecuciones();
 
         // Llega hasta 5100, su límite; la venta de 5200 queda sin tocar
         assertThat(ejecuciones).extracting(Ejecucion::precio).containsExactly(5_000L, 5_100L);
@@ -129,7 +129,7 @@ class LibroOrdenesTest {
     void compraPorDebajoDeLaMejorVentaNoSeEjecuta() {
         libro.procesar(ventaLimite("beto", 5_100, 100));
 
-        List<Ejecucion> ejecuciones = libro.procesar(compraLimite("ana", 5_000, 100));
+        List<Ejecucion> ejecuciones = libro.procesar(compraLimite("ana", 5_000, 100)).ejecuciones();
 
         assertThat(ejecuciones).isEmpty();
         assertThat(libro.mejorCompra()).contains(5_000L);
@@ -141,7 +141,7 @@ class LibroOrdenesTest {
         libro.procesar(compraLimite("ana", 4_900, 50));
         libro.procesar(compraLimite("beto", 5_000, 50));
 
-        List<Ejecucion> ejecuciones = libro.procesar(aMercado("cara", Lado.VENTA, 80));
+        List<Ejecucion> ejecuciones = libro.procesar(aMercado("cara", Lado.VENTA, 80)).ejecuciones();
 
         assertThat(ejecuciones).extracting(Ejecucion::precio, Ejecucion::cantidad)
                 .containsExactly(
@@ -154,7 +154,7 @@ class LibroOrdenesTest {
         libro.procesar(ventaLimite("beto", 5_000, 30));
         ComandoOrden compra = aMercado("ana", Lado.COMPRA, 100);
 
-        List<Ejecucion> ejecuciones = libro.procesar(compra);
+        List<Ejecucion> ejecuciones = libro.procesar(compra).ejecuciones();
 
         assertThat(ejecuciones).singleElement().extracting(Ejecucion::cantidad).isEqualTo(30);
         assertThat(libro.pendienteDe(compra.ordenId())).isZero();
@@ -162,15 +162,88 @@ class LibroOrdenesTest {
     }
 
     @Test
+    void unaOrdenSinContraparteTerminaEnElLibro() {
+        assertThat(libro.procesar(compraLimite("ana", 5_000, 100)).desenlace())
+                .isEqualTo(ResultadoComando.Desenlace.EN_LIBRO);
+    }
+
+    @Test
+    void cadaEjecucionLlevaLoAcumuladoDeLasDosOrdenes() {
+        ComandoOrden venta = ventaLimite("beto", 5_000, 100);
+        libro.procesar(venta);
+
+        ResultadoComando primera = libro.procesar(compraLimite("ana", 5_000, 40));
+        ResultadoComando segunda = libro.procesar(compraLimite("cris", 5_000, 60));
+
+        // La venta de Beto se ejecuta en dos partes: 40 y luego 60, de 100
+        assertThat(primera.ejecuciones()).singleElement().satisfies(e -> {
+            assertThat(e.cantidadVenta()).isEqualTo(100);
+            assertThat(e.ejecutadaVenta()).isEqualTo(40);
+            assertThat(e.cantidadCompra()).isEqualTo(40);
+            assertThat(e.ejecutadaCompra()).isEqualTo(40);
+        });
+        assertThat(segunda.ejecuciones()).singleElement().extracting(Ejecucion::ejecutadaVenta).isEqualTo(100);
+        assertThat(primera.desenlace()).isEqualTo(ResultadoComando.Desenlace.EJECUTADA);
+    }
+
+    @Test
+    void unaOrdenQueCruzaAMediasQuedaEnElLibroConLoEjecutado() {
+        libro.procesar(ventaLimite("beto", 5_000, 30));
+        libro.procesar(ventaLimite("cara", 5_000, 20));
+
+        ResultadoComando resultado = libro.procesar(compraLimite("ana", 5_000, 100));
+
+        assertThat(resultado.desenlace()).isEqualTo(ResultadoComando.Desenlace.EN_LIBRO);
+        assertThat(resultado.ejecuciones()).extracting(Ejecucion::ejecutadaCompra).containsExactly(30, 50);
+    }
+
+    @Test
+    void aUnaOrdenAMercadoQueNoAlcanzaSeLeCancelaElSobrante() {
+        libro.procesar(ventaLimite("beto", 5_000, 30));
+
+        ResultadoComando resultado = libro.procesar(aMercado("ana", Lado.COMPRA, 100));
+
+        assertThat(resultado.desenlace()).isEqualTo(ResultadoComando.Desenlace.SOBRANTE_CANCELADO);
+        assertThat(resultado.ejecuciones()).singleElement().extracting(Ejecucion::ejecutadaCompra).isEqualTo(30);
+    }
+
+    @Test
+    void unaOrdenAMercadoSinContraparteSeCancelaCompleta() {
+        ResultadoComando resultado = libro.procesar(aMercado("ana", Lado.VENTA, 10));
+
+        assertThat(resultado.desenlace()).isEqualTo(ResultadoComando.Desenlace.SOBRANTE_CANCELADO);
+        assertThat(resultado.ejecuciones()).isEmpty();
+    }
+
+    @Test
+    void cancelarDiceCuantoSeAlcanzoAEjecutar() {
+        ComandoOrden venta = ventaLimite("beto", 5_000, 100);
+        libro.procesar(venta);
+        libro.procesar(compraLimite("ana", 5_000, 30));
+
+        ResultadoComando resultado = libro.procesar(cancelar(venta));
+
+        assertThat(resultado.desenlace()).isEqualTo(ResultadoComando.Desenlace.CANCELADA);
+        assertThat(resultado.cancelada())
+                .isEqualTo(new ResultadoComando.OrdenCancelada(venta.ordenId(), "beto", 100, 30));
+    }
+
+    @Test
+    void cancelarUnaOrdenQueNoEstaNoCambiaNada() {
+        assertThat(libro.procesar(cancelar(ventaLimite("beto", 5_000, 100))).desenlace())
+                .isEqualTo(ResultadoComando.Desenlace.SIN_CAMBIOS);
+    }
+
+    @Test
     void cancelarRetiraLaOrdenDelLibro() {
         ComandoOrden venta = ventaLimite("beto", 5_000, 100);
         libro.procesar(venta);
 
-        List<Ejecucion> ejecuciones = libro.procesar(cancelar(venta));
+        List<Ejecucion> ejecuciones = libro.procesar(cancelar(venta)).ejecuciones();
 
         assertThat(ejecuciones).isEmpty();
         assertThat(libro.mejorVenta()).isEmpty();
-        assertThat(libro.procesar(compraLimite("ana", 5_000, 100))).isEmpty();
+        assertThat(libro.procesar(compraLimite("ana", 5_000, 100)).ejecuciones()).isEmpty();
     }
 
     @Test
@@ -179,7 +252,7 @@ class LibroOrdenesTest {
         libro.procesar(venta);
         libro.procesar(compraLimite("ana", 5_000, 100));
 
-        assertThat(libro.procesar(cancelar(venta))).isEmpty();
+        assertThat(libro.procesar(cancelar(venta)).ejecuciones()).isEmpty();
     }
 
     @Test

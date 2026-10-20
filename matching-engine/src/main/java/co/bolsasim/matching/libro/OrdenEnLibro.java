@@ -15,13 +15,20 @@ final class OrdenEnLibro {
     final String usuarioId;
     final Lado lado;
     final long precio;
+    // Lo que pidió la orden al llegar; con el pendiente da lo ejecutado, que va en cada evento
+    final int cantidad;
     int pendiente;
 
-    OrdenEnLibro(UUID ordenId, String usuarioId, Lado lado, long precio, int pendiente) {
+    OrdenEnLibro(UUID ordenId, String usuarioId, Lado lado, long precio, int cantidad, int pendiente) {
         this.ordenId = ordenId;
         this.usuarioId = usuarioId;
         this.lado = lado;
         this.precio = precio;
+        this.cantidad = cantidad;
         this.pendiente = pendiente;
+    }
+
+    int ejecutada() {
+        return cantidad - pendiente;
     }
 }

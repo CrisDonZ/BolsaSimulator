@@ -7,6 +7,8 @@ spring:
       group-id: matching-engine
       # Si el grupo es nuevo, lee el tópico desde el principio
       auto-offset-reset: earliest
+      # Solo lee mensajes de transacciones confirmadas
+      isolation-level: read-committed
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       # ErrorHandlingDeserializer evita que un mensaje mal formado bloquee al consumidor:
       # lo registra como error y sigue con el siguiente.
@@ -15,6 +17,19 @@ spring:
         "[spring.deserializer.value.delegate.class]": org.springframework.kafka.support.serializer.JacksonJsonDeserializer
         # Solo se aceptan clases de este paquete al convertir el JSON (seguridad)
         "[spring.json.trusted.packages]": co.bolsasim.eventos
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # Convierte EventoOrden y OperacionEjecutada a JSON con Jackson 3
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      acks: all
+      # Transacciones de Kafka (RNF-10): con este prefijo, Spring procesa cada comando dentro de una transacción
+      # que incluye los mensajes publicados y el offset del comando. Si algo falla, no queda nada a medias.
+      transaction-id-prefix: matching-engine-
     listener:
       # 3 hilos consumidores para las 6 particiones: cada hilo atiende 2
       concurrency: 3
+
+bolsasim:
+  motor:
+    # Cuántos comandos recientes recuerda para reconocer uno repetido (ver ComandosRecordados)
+    comandos-recordados: 10000
