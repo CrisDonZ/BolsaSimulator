@@ -1,7 +1,9 @@
 package co.bolsasim.order.web;
 
+import co.bolsasim.order.servicio.ConsultaInvalidaException;
 import co.bolsasim.order.servicio.InstrumentoNoDisponibleException;
 import co.bolsasim.order.servicio.OrdenInvalidaException;
+import co.bolsasim.order.servicio.OrdenNoEncontradaException;
 import co.bolsasim.order.servicio.UsuarioNoRegistradoException;
 import java.util.stream.Collectors;
 import org.springframework.http.HttpStatus;
@@ -10,10 +12,11 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import tools.jackson.databind.exc.UnrecognizedPropertyException;
 
 /**
- * Convierte los errores en respuestas 400 claras (formato ProblemDetail, RFC 9457),
+ * Convierte los errores en respuestas claras (formato ProblemDetail, RFC 9457),
  * para que quien llama a la API sepa qué corregir.
  */
 @RestControllerAdvice
@@ -48,6 +51,29 @@ public class ManejadorErrores {
     public ProblemDetail instrumentoNoDisponible(InstrumentoNoDisponibleException e) {
         ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
         problema.setTitle("Instrumento no disponible");
+        return problema;
+    }
+
+    @ExceptionHandler(OrdenNoEncontradaException.class)
+    public ProblemDetail ordenNoEncontrada(OrdenNoEncontradaException e) {
+        ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, e.getMessage());
+        problema.setTitle("Orden no encontrada");
+        return problema;
+    }
+
+    @ExceptionHandler(ConsultaInvalidaException.class)
+    public ProblemDetail consultaInvalida(ConsultaInvalidaException e) {
+        ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, e.getMessage());
+        problema.setTitle("Consulta inválida");
+        return problema;
+    }
+
+    /** Un id que no es un UUID o un tamano que no es un número. Solo se nombra el parámetro, que es nuestro. */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ProblemDetail parametroInvalido(MethodArgumentTypeMismatchException e) {
+        ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
+                e.getName() + " no tiene el formato esperado.");
+        problema.setTitle("Consulta inválida");
         return problema;
     }
 

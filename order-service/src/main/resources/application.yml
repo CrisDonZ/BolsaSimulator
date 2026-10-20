@@ -38,6 +38,12 @@ spring:
       value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
       # Kafka confirma el mensaje solo cuando quedó guardado de forma segura
       acks: all
+      properties:
+        # Con Kafka caído, una ronda del outbox se rinde en 10 s y no en los 2 minutos que trae por defecto;
+        # los eventos esperan en la tabla outbox y salen en la siguiente ronda
+        "[delivery.timeout.ms]": 10000
+        "[request.timeout.ms]": 5000
+        "[max.block.ms]": 5000
     consumer:
       # Lee users.registered para saber qué usuarios existen
       group-id: order-service

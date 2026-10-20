@@ -3,9 +3,12 @@ package co.bolsasim.order.web;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.startsWith;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -14,19 +17,29 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import co.bolsasim.eventos.ComandoOrden;
 import co.bolsasim.eventos.EstadoInstrumento;
 import co.bolsasim.eventos.InstrumentoActualizado;
+import co.bolsasim.eventos.Lado;
+import co.bolsasim.eventos.TipoOrden;
+import co.bolsasim.eventos.Topicos;
 import co.bolsasim.order.TokensDePrueba;
 import co.bolsasim.order.instrumento.Instrumento;
 import co.bolsasim.order.instrumento.RepositorioInstrumentos;
+import co.bolsasim.order.orden.ConsultaOrdenes;
+import co.bolsasim.order.orden.Cursor;
+import co.bolsasim.order.orden.FiltroEstado;
+import co.bolsasim.order.orden.Orden;
+import co.bolsasim.order.orden.RepositorioOrdenes;
+import co.bolsasim.order.outbox.Outbox;
 import co.bolsasim.order.seguridad.ConfiguracionSeguridad;
 import co.bolsasim.order.seguridad.RespuestaNoAutorizado;
-import co.bolsasim.order.servicio.PublicadorOrdenes;
 import co.bolsasim.order.servicio.ServicioOrdenes;
 import co.bolsasim.order.usuario.RepositorioUsuarios;
 import com.nimbusds.jose.jwk.RSAKey;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -46,8 +59,9 @@ import org.springframework.test.web.servlet.ResultActions;
 /**
  * Prueba de la capa web con la seguridad real: los tokens se firman con la clave de prueba y
  * order-service los valida contra el JWKS de {@link TokensDePrueba}, como haría con auth-service.
- * El servicio de órdenes también es el real; el publicador de Kafka y las copias locales de usuarios
- * e instrumentos son dobles de Mockito, así se puede ver qué comando se publicaría sin levantar Kafka ni base de datos.
+ * El servicio de órdenes también es el real; el outbox, los repositorios y las copias locales de usuarios
+ * e instrumentos son dobles de Mockito, así se puede ver qué comando saldría hacia el motor sin levantar Kafka
+ * ni base de datos.
  */
 @WebMvcTest(OrdenController.class)
 @Import({ConfiguracionSeguridad.class, RespuestaNoAutorizado.class, ServicioOrdenes.class})
@@ -66,7 +80,13 @@ class OrdenControllerTest {
     private MockMvc mvc;
 
     @MockitoBean
-    private PublicadorOrdenes publicador;
+    private Outbox outbox;
+
+    @MockitoBean
+    private RepositorioOrdenes ordenes;
+
+    @MockitoBean
+    private ConsultaOrdenes consulta;
 
     @MockitoBean
     private RepositorioUsuarios usuarios;
@@ -78,49 +98,143 @@ class OrdenControllerTest {
     void elUsuarioDelTokenEstaRegistradoYAndxEstaActivo() {
         when(usuarios.existsById(UUID.fromString(USUARIO))).thenReturn(true);
         when(instrumentos.findById("ANDX")).thenReturn(Optional.of(instrumento("ANDX", EstadoInstrumento.ACTIVO)));
+        when(ordenes.save(any())).thenAnswer(invocacion -> invocacion.getArgument(0));
     }
 
     @Test
-    void unaOrdenDeUnInstrumentoSuspendidoResponde422YNoSePublica() throws Exception {
+    void unaOrdenAceptadaTraeLaUbicacionParaConsultarla() throws Exception {
+        var respuesta = enviar(ORDEN, TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse();
+        String ordenId = respuesta.getContentAsString().replaceAll(".*\"ordenId\":\"([^\"]+)\".*", "$1");
+
+        assertThat(respuesta.getHeader(HttpHeaders.LOCATION)).isEqualTo("/api/ordenes/" + ordenId);
+    }
+
+    @Test
+    void consultarSuOrdenResponde200ConElEstado() throws Exception {
+        Orden orden = ordenDe(USUARIO);
+        when(ordenes.findByIdAndUsuarioId(orden.getId(), UUID.fromString(USUARIO))).thenReturn(Optional.of(orden));
+
+        consultar("/api/ordenes/" + orden.getId(), TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(orden.getId().toString()))
+                .andExpect(jsonPath("$.estado").value("PENDIENTE"))
+                .andExpect(jsonPath("$.cantidadEjecutada").value(0))
+                .andExpect(jsonPath("$.precioPromedio").isEmpty())
+                .andExpect(jsonPath("$.usuarioId").doesNotExist())
+                .andExpect(jsonPath("$.version").doesNotExist());
+    }
+
+    @Test
+    void laOrdenDeOtroResponde404IgualQueUnaQueNoExiste() throws Exception {
+        Orden deBeto = ordenDe(UUID.randomUUID().toString());
+        UUID inexistente = UUID.randomUUID();
+        String tokenDeAna = TokensDePrueba.valido(USUARIO);
+
+        String deOtro = consultar("/api/ordenes/" + deBeto.getId(), tokenDeAna)
+                .andExpect(status().isNotFound())
+                .andReturn().getResponse().getContentAsString();
+        String deNadie = consultar("/api/ordenes/" + inexistente, tokenDeAna)
+                .andExpect(status().isNotFound())
+                .andReturn().getResponse().getContentAsString();
+
+        // Lo mismo en los dos casos, salvo el id que Ana pidió: no sabe que la orden de Beto existe
+        assertThat(deOtro).isEqualTo(deNadie.replace(inexistente.toString(), deBeto.getId().toString()))
+                .contains("\"title\":\"Orden no encontrada\"");
+    }
+
+    @Test
+    void laListaTraeLasOrdenesYElCursorDeLaSiguientePagina() throws Exception {
+        List<Orden> tres = List.of(ordenDe(USUARIO), ordenDe(USUARIO), ordenDe(USUARIO));
+        when(consulta.buscar(UUID.fromString(USUARIO), FiltroEstado.TODAS, null, 3)).thenReturn(tres);
+
+        consultar("/api/ordenes?tamano=2", TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ordenes.length()").value(2))
+                .andExpect(jsonPath("$.ordenes[0].id").value(tres.get(0).getId().toString()))
+                .andExpect(jsonPath("$.siguiente").value(Cursor.despuesDe(tres.get(1)).codificar()))
+                .andExpect(jsonPath("$.totalElementos").doesNotExist());
+    }
+
+    @Test
+    void laListaSinTamanoUsa20YPideUnaFilaDeMas() throws Exception {
+        consultar("/api/ordenes?estado=ABIERTAS", TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ordenes").isEmpty())
+                .andExpect(jsonPath("$.siguiente").isEmpty());
+        verify(consulta).buscar(UUID.fromString(USUARIO), FiltroEstado.ABIERTAS, null, 21);
+    }
+
+    @Test
+    void parametrosInvalidosDeLaListaResponden400() throws Exception {
+        String token = TokensDePrueba.valido(USUARIO);
+
+        consultar("/api/ordenes?tamano=101", token)
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail").value("tamano debe estar entre 1 y 100."));
+        consultar("/api/ordenes?tamano=muchas", token)
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail").value("tamano no tiene el formato esperado."));
+        consultar("/api/ordenes?estado=VIVAS", token)
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail").value(startsWith("estado debe ser uno de: ABIERTAS")));
+        consultar("/api/ordenes?despues=alterado", token)
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail").value(startsWith("despues no es válido")));
+        consultar("/api/ordenes/no-es-un-id", token)
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(consulta, ordenes);
+    }
+
+    @Test
+    void consultarSinTokenResponde401() throws Exception {
+        consultar("/api/ordenes", null).andExpect(status().isUnauthorized());
+        consultar("/api/ordenes/" + UUID.randomUUID(), null).andExpect(status().isUnauthorized());
+        verifyNoInteractions(consulta, ordenes);
+    }
+
+    @Test
+    void unaOrdenDeUnInstrumentoSuspendidoResponde422YNoSeGuarda() throws Exception {
         when(instrumentos.findById("ANDX")).thenReturn(Optional.of(instrumento("ANDX", EstadoInstrumento.SUSPENDIDO)));
 
         enviar(ORDEN, TokensDePrueba.valido(USUARIO))
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.title").value("Instrumento no disponible"))
                 .andExpect(jsonPath("$.detail").value("El instrumento ANDX está suspendido: no recibe órdenes nuevas."));
-        verifyNoInteractions(publicador);
+        verifyNoInteractions(outbox);
     }
 
     @Test
-    void unaOrdenDeUnInstrumentoQueNoExisteResponde422YNoSePublica() throws Exception {
+    void unaOrdenDeUnInstrumentoQueNoExisteResponde422YNoSeGuarda() throws Exception {
         enviar(ORDEN.replace("ANDX", "NADA"), TokensDePrueba.valido(USUARIO))
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.title").value("Instrumento no disponible"))
                 .andExpect(jsonPath("$.detail").value("El instrumento NADA no existe."));
-        verifyNoInteractions(publicador);
+        verifyNoInteractions(outbox);
     }
 
     @Test
-    void conUnTokenValidoLaOrdenSePublicaANombreDelSubDelToken() throws Exception {
+    void conUnTokenValidoLaOrdenQuedaEnElOutboxANombreDelSubDelToken() throws Exception {
         enviar(ORDEN, TokensDePrueba.valido(USUARIO))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.simbolo").value("ANDX"))
                 .andExpect(jsonPath("$.ordenId").isNotEmpty());
 
-        ArgumentCaptor<ComandoOrden> publicado = ArgumentCaptor.forClass(ComandoOrden.class);
-        verify(publicador).publicar(publicado.capture());
-        assertThat(publicado.getValue().usuarioId()).isEqualTo(USUARIO);
-        assertThat(publicado.getValue().simbolo()).isEqualTo("ANDX");
+        ArgumentCaptor<Object> comando = ArgumentCaptor.forClass(Object.class);
+        verify(outbox).guardar(eq(Topicos.ORDERS_COMMANDS), eq("ANDX"), comando.capture());
+        assertThat(((ComandoOrden) comando.getValue()).usuarioId()).isEqualTo(USUARIO);
+        assertThat(((ComandoOrden) comando.getValue()).simbolo()).isEqualTo("ANDX");
     }
 
     @Test
-    void sinTokenResponde401YNoSePublica() throws Exception {
+    void sinTokenResponde401YNoSeGuarda() throws Exception {
         enviar(ORDEN, null)
                 .andExpect(status().isUnauthorized())
                 .andExpect(header().string(HttpHeaders.WWW_AUTHENTICATE, "Bearer"))
                 .andExpect(header().string(HttpHeaders.CONTENT_TYPE, startsWith(MediaType.APPLICATION_PROBLEM_JSON_VALUE)))
                 .andExpect(jsonPath("$.detail").value(startsWith("Falta el token de acceso")));
-        verifyNoInteractions(publicador);
+        verifyNoInteractions(outbox);
     }
 
     @Test
@@ -163,7 +277,7 @@ class OrdenControllerTest {
     }
 
     @Test
-    void siElCuerpoTraeUsuarioIdResponde400YNoSePublica() throws Exception {
+    void siElCuerpoTraeUsuarioIdResponde400YNoSeGuarda() throws Exception {
         // Aunque el token sea válido, nadie puede poner una orden a nombre de otro usuario
         String aNombreDeOtro = """
                 {"usuarioId":"%s","simbolo":"ANDX","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":100}"""
@@ -173,7 +287,7 @@ class OrdenControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.detail").value(
                         "usuarioId ya no se envía: el usuario de la orden sale del token de acceso."));
-        verifyNoInteractions(publicador);
+        verifyNoInteractions(outbox);
     }
 
     @Test
@@ -184,7 +298,7 @@ class OrdenControllerTest {
         enviar(conCampoDeMas, TokensDePrueba.valido(USUARIO))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.detail").value(startsWith("La orden trae un campo que no existe")));
-        verifyNoInteractions(publicador);
+        verifyNoInteractions(outbox);
     }
 
     @Test
@@ -192,7 +306,7 @@ class OrdenControllerTest {
         enviar(ORDEN.replace("COMPRA", "REGALO"), TokensDePrueba.valido(USUARIO))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.detail").value(containsString("COMPRA o VENTA")));
-        verifyNoInteractions(publicador);
+        verifyNoInteractions(outbox);
     }
 
     @Test
@@ -200,7 +314,7 @@ class OrdenControllerTest {
         enviar(ORDEN.replace("\"cantidad\":100", "\"cantidad\":0"), TokensDePrueba.valido(USUARIO))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.detail").value(containsString("cantidad")));
-        verifyNoInteractions(publicador);
+        verifyNoInteractions(outbox);
     }
 
     @Test
@@ -212,7 +326,7 @@ class OrdenControllerTest {
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.title").value("Usuario no registrado"))
                 .andExpect(jsonPath("$.detail").value(containsString(recienRegistrado + " no está registrado")));
-        verifyNoInteractions(publicador);
+        verifyNoInteractions(outbox);
     }
 
     private ResultActions enviar(String cuerpo, String token) throws Exception {
@@ -228,10 +342,24 @@ class OrdenControllerTest {
                 estado, Instant.now()));
     }
 
+    private ResultActions consultar(String ruta, String token) throws Exception {
+        var peticion = get(ruta);
+        if (token != null) {
+            peticion.header(HttpHeaders.AUTHORIZATION, "Bearer " + token);
+        }
+        return mvc.perform(peticion);
+    }
+
+    /** Una orden PENDIENTE de ese usuario, como si viniera de la base. */
+    private static Orden ordenDe(String usuarioId) {
+        return Orden.nueva(ComandoOrden.nueva(usuarioId, "ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100),
+                UUID.fromString(usuarioId), Instant.now().truncatedTo(ChronoUnit.MICROS));
+    }
+
     private void rechazado(ResultActions respuesta) throws Exception {
         respuesta.andExpect(status().isUnauthorized())
                 .andExpect(header().string(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"invalid_token\""))
                 .andExpect(jsonPath("$.detail").value(startsWith("El token de acceso no es válido o ya venció")));
-        verifyNoInteractions(publicador);
+        verifyNoInteractions(outbox);
     }
 }
