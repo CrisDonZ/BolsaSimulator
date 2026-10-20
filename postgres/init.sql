@@ -2,3 +2,4 @@
 -- Una base por servicio: ningún servicio lee las tablas de otro (ver el modelo entidad-relación).
 CREATE DATABASE auth;
 CREATE DATABASE ordenes;
+CREATE DATABASE mercado;

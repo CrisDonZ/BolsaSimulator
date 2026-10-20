@@ -9,17 +9,23 @@ import static org.mockito.Mockito.when;
 
 import co.bolsasim.eventos.AccionComando;
 import co.bolsasim.eventos.ComandoOrden;
+import co.bolsasim.eventos.EstadoInstrumento;
+import co.bolsasim.eventos.InstrumentoActualizado;
 import co.bolsasim.eventos.Lado;
 import co.bolsasim.eventos.TipoOrden;
+import co.bolsasim.order.instrumento.Instrumento;
+import co.bolsasim.order.instrumento.RepositorioInstrumentos;
 import co.bolsasim.order.usuario.RepositorioUsuarios;
 import co.bolsasim.order.web.CrearOrdenRequest;
+import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Prueba unitaria: no levanta Spring, Kafka ni base de datos. El publicador y el repositorio
- * de usuarios son "dobles" de Mockito, así comprobamos solo las reglas del servicio.
+ * Prueba unitaria: no levanta Spring, Kafka ni base de datos. El publicador y las copias locales
+ * de usuarios e instrumentos son "dobles" de Mockito, así comprobamos solo las reglas del servicio.
  */
 class ServicioOrdenesTest {
 
@@ -27,11 +33,35 @@ class ServicioOrdenesTest {
 
     private final PublicadorOrdenes publicador = mock(PublicadorOrdenes.class);
     private final RepositorioUsuarios usuarios = mock(RepositorioUsuarios.class);
-    private final ServicioOrdenes servicio = new ServicioOrdenes(publicador, usuarios);
+    private final RepositorioInstrumentos instrumentos = mock(RepositorioInstrumentos.class);
+    private final ServicioOrdenes servicio = new ServicioOrdenes(publicador, usuarios, instrumentos);
 
     @BeforeEach
-    void soloExisteUnUsuarioRegistrado() {
+    void soloExistenUnUsuarioRegistradoYDosInstrumentosActivos() {
         when(usuarios.existsById(REGISTRADO)).thenReturn(true);
+        when(instrumentos.findById("ANDX")).thenReturn(Optional.of(instrumento("ANDX", EstadoInstrumento.ACTIVO)));
+        when(instrumentos.findById("CAFE")).thenReturn(Optional.of(instrumento("CAFE", EstadoInstrumento.ACTIVO)));
+    }
+
+    @Test
+    void ordenDeUnInstrumentoQueNoExisteSeRechazaYNoSePublica() {
+        var request = orden("NADA", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100);
+
+        assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), request))
+                .isInstanceOf(InstrumentoNoDisponibleException.class)
+                .hasMessage("El instrumento NADA no existe.");
+        verifyNoInteractions(publicador);
+    }
+
+    @Test
+    void ordenDeUnInstrumentoSuspendidoSeRechazaYNoSePublica() {
+        when(instrumentos.findById("ANDX")).thenReturn(Optional.of(instrumento("ANDX", EstadoInstrumento.SUSPENDIDO)));
+        var request = orden("andx", Lado.VENTA, TipoOrden.LIMITE, 5_000L, 100);
+
+        assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), request))
+                .isInstanceOf(InstrumentoNoDisponibleException.class)
+                .hasMessage("El instrumento ANDX está suspendido: no recibe órdenes nuevas.");
+        verifyNoInteractions(publicador);
     }
 
     @Test
@@ -108,5 +138,10 @@ class ServicioOrdenesTest {
 
     private static CrearOrdenRequest orden(String simbolo, Lado lado, TipoOrden tipo, Long precio, int cantidad) {
         return new CrearOrdenRequest(simbolo, lado, tipo, precio, cantidad);
+    }
+
+    private static Instrumento instrumento(String simbolo, EstadoInstrumento estado) {
+        return new Instrumento(new InstrumentoActualizado(simbolo, "Empresa", "Sector", 5_000, 10, 1_000_000, estado,
+                Instant.now()));
     }
 }

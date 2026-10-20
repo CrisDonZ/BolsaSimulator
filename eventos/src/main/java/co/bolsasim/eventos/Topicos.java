@@ -12,6 +12,9 @@ public final class Topicos {
     /** Usuarios recién registrados en auth-service. Clave del mensaje = id del usuario. */
     public static final String USERS_REGISTERED = "users.registered";
 
+    /** Alta, cambio, suspensión o reactivación de un instrumento. Compactado; clave del mensaje = símbolo. */
+    public static final String INSTRUMENTS_EVENTS = "instruments.events";
+
     private Topicos() {
     }
 }
