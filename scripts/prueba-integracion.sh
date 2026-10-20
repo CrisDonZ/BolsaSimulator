@@ -6,8 +6,9 @@
 # directo a auth-service, order-service y market-data-service, sin el gateway) y que una orden con
 # usuarioId en el cuerpo recibe 400. Después el ADMIN crea un instrumento nuevo con todo corriendo
 # (un inversionista recibe 403), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se
-# envían una venta y una compra de ese instrumento que se cruzan, y se comprueba que el motor registra la
-# ejecución a nombre del usuario del token. Por último renueva el token y comprueba que, después de
+# envían una venta y una compra de ese instrumento que se cruzan, y se comprueba que sus comandos salen del
+# outbox y que el motor registra la ejecución a nombre del usuario del token. Las órdenes se consultan por id
+# y en la lista paginada, y otro usuario recibe 404. Por último renueva el token y comprueba que, después de
 # cerrar sesión, el token de refresco ya no sirve.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
@@ -203,11 +204,30 @@ echo "   suspendido 422 hasta que se reactiva; directo a order-service también 
 
 echo "7. Enviando con el token una venta y una compra de $SIMBOLO a 5000..."
 comprobar "Venta" "$(pedir POST /api/ordenes "${ORDEN/COMPRA/VENTA}" "$TOKEN")" 202
+VENTA=$(campo ordenId)
 comprobar "Compra" "$(pedir POST /api/ordenes "$ORDEN" "$TOKEN")" 202
+COMPRA=$(campo ordenId)
 
-# El motor anota el usuario de cada orden: el id del registro solo puede venir del "sub" del token
+# El comando sale del outbox; el motor anota el usuario de cada orden: solo puede venir del "sub" del token
 esperar "Ejecución: 10 acciones de $SIMBOLO a 5000 COP .*($ID)" "$LOGS/matching-engine.log" 30
-echo "   El motor ejecutó las órdenes del instrumento nuevo a nombre del usuario del token"
+esperar "Evento .* del outbox publicado en orders.commands (clave $SIMBOLO" "$LOGS/order-service.log" 10
+echo "   Los comandos salieron del outbox y el motor ejecutó las órdenes a nombre del usuario del token"
+
+echo "   Consultando las órdenes guardadas..."
+comprobar "Consultar la compra" "$(pedir GET "/api/ordenes/$COMPRA" "" "$TOKEN")" 200
+grep -q '"estado":"PENDIENTE"' "$LOGS/respuesta.json"
+# Una por página: la más reciente (la compra) primero, y el cursor lleva a la venta
+comprobar "Primera página de una orden" "$(pedir GET "/api/ordenes?tamano=1" "" "$TOKEN")" 200
+grep -q "\"id\":\"$COMPRA\"" "$LOGS/respuesta.json"
+SIGUIENTE=$(campo siguiente)
+comprobar "Segunda página" "$(pedir GET "/api/ordenes?tamano=1&despues=$SIGUIENTE" "" "$TOKEN")" 200
+grep -q "\"id\":\"$VENTA\"" "$LOGS/respuesta.json"
+comprobar "Página de 101 órdenes" "$(pedir GET "/api/ordenes?tamano=101" "" "$TOKEN")" 400
+comprobar "Login del segundo usuario" "$(pedir POST /api/auth/login "{\"correo\":\"otro_$SUFIJO@bolsasim.co\",\"contrasena\":\"secreta123\"}")" 200
+TOKEN_OTRO=$(campo tokenAcceso)
+comprobar "La orden de otro usuario" "$(pedir GET "/api/ordenes/$COMPRA" "" "$TOKEN_OTRO")" 404
+comprobar "Consultar órdenes directo a order-service sin token" "$(GATEWAY=$ORDER_SERVICE pedir GET /api/ordenes)" 401
+echo "   Por id 200 (PENDIENTE), paginación con cursor 200, página de 101 400, orden de otro 404, sin token 401"
 
 echo "8. Renovando el token y cerrando sesión..."
 comprobar "Renovar el token" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200
@@ -218,4 +238,4 @@ comprobar "Cerrar sesión" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"
 comprobar "Renovar después de cerrar sesión" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 echo "   Refresco 200, logout sin token 401, logout 204 y refresco revocado 401"
 
-echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, las órdenes viajaron por Kafka y el motor las ejecutó. Logs en $LOGS/"
+echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, las órdenes quedaron guardadas, viajaron por Kafka y el motor las ejecutó. Logs en $LOGS/"

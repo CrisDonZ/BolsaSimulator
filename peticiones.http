@@ -17,6 +17,8 @@
 @token = PEGA-AQUI-EL-TOKEN-DE-ACCESO
 @tokenRefresco = PEGA-AQUI-EL-TOKEN-DE-REFRESCO
 @tokenAdmin = PEGA-AQUI-EL-TOKEN-DEL-ADMIN
+@ordenId = PEGA-AQUI-EL-ORDENID-DE-UNA-ORDEN
+@siguiente = PEGA-AQUI-EL-VALOR-SIGUIENTE-DE-LA-PAGINA-ANTERIOR
 
 ### 1. Registrar un usuario (no necesita token). Pega el "id" de la respuesta en @usuarioId.
 POST {{gateway}}/api/usuarios
@@ -65,7 +67,8 @@ Content-Type: application/json
 GET {{gateway}}/api/usuarios/{{usuarioId}}
 Authorization: Bearer {{token}}
 
-### 6. Compra límite: 100 acciones de ANDX pagando máximo 5.000 COP cada una (a nombre del usuario del token)
+### 6. Compra límite: 100 acciones de ANDX pagando máximo 5.000 COP cada una (a nombre del usuario del token).
+###    Responde 202 con el "ordenId": pégalo en @ordenId para consultarla con la 29.
 POST {{gateway}}/api/ordenes
 Authorization: Bearer {{token}}
 Content-Type: application/json
@@ -262,3 +265,25 @@ Authorization: Bearer {{tokenAdmin}}
 ### 25. Reactivar (solo ADMIN) -> 200. Las órdenes de MANGO vuelven a pasar.
 POST {{gateway}}/api/instrumentos/MANGO/reactivar
 Authorization: Bearer {{tokenAdmin}}
+
+### 26. Mis órdenes (HU-09): las 20 más recientes, con estado, cantidad ejecutada y precio promedio.
+###     Si hay más, "siguiente" trae un valor: pégalo en @siguiente y usa la 28.
+GET {{gateway}}/api/ordenes
+Authorization: Bearer {{token}}
+
+### 27. Solo las abiertas (ABIERTA y PARCIAL), de 5 en 5. También sirve un estado: PENDIENTE, EJECUTADA, CANCELADA...
+GET {{gateway}}/api/ordenes?estado=ABIERTAS&tamano=5
+Authorization: Bearer {{token}}
+
+### 28. La página siguiente: el mismo filtro y tamaño, más el "siguiente" de la página anterior
+GET {{gateway}}/api/ordenes?tamano=20&despues={{siguiente}}
+Authorization: Bearer {{token}}
+
+### 29. Una orden por su id (el "ordenId" que devuelve la 6, o el header Location) -> 200.
+###     La de otro usuario responde 404, igual que una que no existe.
+GET {{gateway}}/api/ordenes/{{ordenId}}
+Authorization: Bearer {{token}}
+
+### 30. Error a propósito: más de 100 por página -> 400 "tamano debe estar entre 1 y 100."
+GET {{gateway}}/api/ordenes?tamano=500
+Authorization: Bearer {{token}}

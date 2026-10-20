@@ -1,6 +1,6 @@
 # BolsaSim — proyecto inicial
 
-Simulador de bolsa: el **gateway** es la única entrada y exige un token válido; **auth-service** registra a los usuarios y les abre sesión con tokens JWT; **market-data-service** guarda el catálogo de instrumentos, que el administrador crea, edita y suspende; **order-service** recibe las órdenes por REST, acepta solo las de instrumentos activos y las publica en Kafka; **matching-engine** las lee y las cruza en el libro de órdenes de su símbolo. Por ahora las ejecuciones solo se muestran en el log.
+Simulador de bolsa: el **gateway** es la única entrada y exige un token válido; **auth-service** registra a los usuarios y les abre sesión con tokens JWT; **market-data-service** guarda el catálogo de instrumentos, que el administrador crea, edita y suspende; **order-service** recibe las órdenes por REST, acepta solo las de instrumentos activos, las guarda y las publica en Kafka con el patrón outbox, y deja que cada usuario consulte las suyas; **matching-engine** las lee y las cruza en el libro de órdenes de su símbolo. Por ahora las ejecuciones solo se muestran en el log.
 
 Piensa en Kafka como un buzón con 6 casilleros (particiones). order-service deja cada orden en el casillero de su símbolo y el motor las recoge en el mismo orden en que llegaron.
 
@@ -14,9 +14,13 @@ Postman / curl ──▶ gateway                            (puerto 8082) ──
                          │                                                    (compactado, clave = símbolo)
                          │                                                          │ copia local de los instrumentos
                          │                                                          ▼
-                         └─/api/ordenes─────────────▶ order-service ──▶ Kafka: orders.commands ──▶ matching-engine
-                           (con el mismo header        (puerto 8081)     (6 particiones,            (log: "Orden recibida")
-                            Authorization)                               clave = símbolo)
+                         └─/api/ordenes─────────────▶ order-service ──▶ PostgreSQL (base "ordenes"):
+                           (con el mismo header        (puerto 8081)     ORDEN + OUTBOX en la misma transacción
+                            Authorization)                                     │ publicador del outbox (cada 100 ms)
+                                                                               ▼
+                                                                         Kafka: orders.commands ──▶ matching-engine
+                                                                         (6 particiones,            (log: "Orden recibida")
+                                                                          clave = símbolo)
 ```
 
 ## Estructura
@@ -24,7 +28,7 @@ Postman / curl ──▶ gateway                            (puerto 8082) ──
 | Carpeta | Qué contiene |
 | --- | --- |
 | `eventos/` | Java puro, sin Spring: los eventos `ComandoOrden`, `UsuarioRegistrado` e `InstrumentoActualizado`, los enums y los nombres de tópicos. Lo comparten todos los servicios. |
-| `order-service/` | API REST `POST /api/ordenes`, validaciones y el publicador de Kafka. Vuelve a validar el JWT con la clave pública de auth-service y toma el usuario de la orden del token (`sub`), no del cuerpo. Escucha `users.registered` y `instruments.events` y guarda en su base una copia de los usuarios (tabla `usuario_registrado`) y de los instrumentos (tabla `instrumento`): acepta solo órdenes de usuarios registrados y de instrumentos activos. |
+| `order-service/` | API REST `POST /api/ordenes` y la consulta de tus órdenes (`GET /api/ordenes`, paginada por cursor, y `GET /api/ordenes/{id}`, HU-09). Guarda cada orden en la tabla ORDEN y su comando en OUTBOX en la misma transacción; un publicador lo envía a Kafka cada 100 ms, así ningún comando se pierde si Kafka está caído (RNF-12). Vuelve a validar el JWT con la clave pública de auth-service y toma el usuario de la orden del token (`sub`), no del cuerpo. Escucha `users.registered` y `instruments.events` y guarda en su base una copia de los usuarios (tabla `usuario_registrado`) y de los instrumentos (tabla `instrumento`): acepta solo órdenes de usuarios registrados y de instrumentos activos. |
 | `market-data-service/` | Por ahora, solo el catálogo de instrumentos (HU-22): `GET /api/instrumentos` para cualquier usuario con token, y crear, editar, suspender y reactivar solo para el rol `ADMIN`. Guarda la tabla INSTRUMENTO en PostgreSQL con Flyway, arranca con 10 instrumentos ficticios y publica cada cambio en `instruments.events`. Valida el JWT por su cuenta. El último precio y las velas llegarán en el sprint 4. |
 | `matching-engine/` | El consumidor de Kafka y el libro de órdenes (`libro/`, Java puro con pruebas JUnit). |
 | `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. Vuelve a validar el JWT en las rutas protegidas: cada usuario solo consulta su propio perfil y solo cierra sus propias sesiones. Al arrancar crea el primer `ADMIN` con las variables `BOLSASIM_ADMIN_CORREO` y `BOLSASIM_ADMIN_CONTRASENA`. |
@@ -62,7 +66,7 @@ Si tu contenedor de PostgreSQL es de antes de market-data-service, no tiene la b
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 190 pruebas pasadas: 32 de order-service, 14 del libro de órdenes, 83 de auth-service, 42 de market-data-service y 19 del gateway. Las de integración de auth-service, order-service y market-data-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 221 pruebas pasadas: 63 de order-service, 14 del libro de órdenes, 83 de auth-service, 42 de market-data-service y 19 del gateway. Las de integración de auth-service, order-service y market-data-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -143,6 +147,9 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/auth/logout -Heade
 | `PUT /api/instrumentos/{simbolo}` | Sí, `ADMIN` | `200`. Solo cambian `nombre` y `sector`; si llega `tick`, `precioInicial`, `accionesEmitidas` o `simbolo`, responde `400` diciendo que no se puede cambiar. |
 | `POST /api/instrumentos/{simbolo}/suspender` y `/reactivar` | Sí, `ADMIN` | `200`. Suspendido, el instrumento rechaza órdenes nuevas con `422` (RF-29); reactivado, vuelve a aceptarlas. |
 | Las rutas de `ADMIN` con otro rol | Sí | `403` "Solo un administrador puede gestionar instrumentos.". No `404` como en los perfiles: el catálogo lo ve cualquiera, así que no hay nada que ocultar. |
+| `POST /api/ordenes` | Sí | `202` con el `ordenId` y el header `Location: /api/ordenes/{id}`. La orden queda guardada PENDIENTE aunque Kafka esté caído. |
+| `GET /api/ordenes/{id}` | Sí | `200` con la orden: estado, cantidad ejecutada, precio promedio y fechas. La de otro usuario responde `404`, igual que una que no existe (RNF-23). |
+| `GET /api/ordenes?estado=…&tamano=…&despues=…` | Sí | `200` con `ordenes` (de la más reciente a la más vieja) y `siguiente`. Ver *Tus órdenes* abajo. |
 | Todas las rutas que piden token | Sí | Sin token, con el token vencido, con la firma alterada o de otro emisor: `401` del gateway, y la petición no llega al servicio. auth-service, order-service y market-data-service vuelven a validar el token: llamándolos directo al 8082, al 8081 o al 8083 también responden `401`. |
 
 El token de acceso lleva solo el id del usuario (`sub`) y su `rol`: nada de correo ni nombre, porque cualquiera que lo tenga puede leerlo. En la base solo se guarda el hash del token de refresco. El gateway no mira el `rol`: cada servicio decide qué puede hacer cada rol.
@@ -191,16 +198,31 @@ O con `enviar-ordenes.ps1`, que inicia sesión por ti: `.\enviar-ordenes.ps1 -Co
 
 ## Qué debes ver
 
-- **Respuesta:** `202 Accepted` con el `ordenId`. Es 202 y no 201 porque la orden se procesa después, cuando el motor la lea.
+- **Respuesta:** `202 Accepted` con el `ordenId` y el header `Location`. Es 202 y no 201 porque la orden quedó guardada, pero el motor la procesa después.
 - **Sin token o con el token vencido:** `401 Unauthorized` del gateway; la orden ni siquiera llega a order-service.
 - **Si el cuerpo trae `usuarioId`** (o cualquier campo que no existe): `400 Bad Request` con "usuarioId ya no se envía: el usuario de la orden sale del token de acceso.", y la orden no se publica.
 - **Si el usuario del token todavía no está en order-service:** `422 Unprocessable Content` con el motivo, y la orden no se publica. order-service conoce a los usuarios por el tópico `users.registered`, así que justo después de registrarte puede tardar unos milisegundos en aceptarte.
 - **Si el instrumento no existe o está suspendido:** `422` con "El instrumento NADA no existe." o "El instrumento ANDX está suspendido: no recibe órdenes nuevas.", y la orden no se publica.
-- **Log de order-service:** `Orden ... publicada en orders.commands (clave ANDX, partición 2, offset 0)`.
+- **Log de order-service:** `Evento ... del outbox publicado en orders.commands (clave ANDX, partición 2, offset 0)`, unos 100 ms después de la respuesta.
 - **Log de matching-engine:** `Orden recibida: NUEVA COMPRA 100 acciones de ANDX a 5000 COP | partición 2, offset 0`.
 - **Kafka UI:** en *Topics → orders.commands → Messages* aparece el mensaje en JSON.
 
 El número de partición puede ser otro; lo importante es lo que muestran los experimentos.
+
+## Tus órdenes
+
+Cada orden queda guardada con su estado. Por ahora todas quedan `PENDIENTE`: los estados `ABIERTA`, `PARCIAL` y `EJECUTADA` llegarán cuando el motor publique `orders.events`.
+
+```powershell
+(Invoke-RestMethod -Uri "http://localhost:8080/api/ordenes?tamano=5" -Headers $auth).ordenes | Format-Table simbolo, lado, cantidad, estado, creadaEn
+```
+
+- **Filtro:** `estado=ABIERTAS` trae las `ABIERTA` y `PARCIAL` (HU-09); también sirve un estado exacto (`PENDIENTE`, `EJECUTADA`, `CANCELADA`...). Sin `estado`, todas.
+- **Páginas:** `tamano` va de 1 a 100 (20 si no lo envías). Si hay más órdenes, la respuesta trae `siguiente`: envíalo tal cual en `despues` para pedir la página siguiente, con el mismo filtro. Cuando `siguiente` es `null`, no hay más.
+- **Por qué un cursor y no números de página:** con `?pagina=500`, PostgreSQL tendría que leer y descartar 10.000 órdenes, y contar el total recorrería todas en cada petición; un bot que envía una orden cada 200 ms acumula unas 430.000 al día. Con el cursor, cada página salta directo en un índice a donde quedó la anterior: la primera y la número 10.000 cuestan lo mismo, y una orden nueva no corre las páginas siguientes. Por eso tampoco hay total.
+- **Índices:** uno para cada forma de la consulta (todas, un estado y las abiertas), con las columnas en el orden de la lista. Una prueba revisa con `EXPLAIN` que cada consulta usa el suyo sin ordenar en memoria, con 20.000 órdenes de un mismo usuario.
+
+**Si Kafka está caído** al enviar la orden, igual responde `202` y la orden queda guardada: su comando espera en la tabla `outbox` y sale en cuanto Kafka vuelve (el publicador lo reintenta cada 100 ms, y avisa en el log). Pruébalo con `docker compose stop kafka`, envía una orden y luego `docker compose start kafka`.
 
 ## Dos experimentos para entender Kafka
 
@@ -225,6 +247,9 @@ El número de partición puede ser otro; lo importante es lo que muestran los ex
 | No puedes iniciar sesión como ADMIN | auth-service arrancó sin las variables, o ese correo ya era de una cuenta normal (nunca se asciende) | Revisa el log de auth-service: dice si creó el administrador o por qué no; usa un correo que nadie haya registrado |
 | auth-service no arranca: `BOLSASIM_ADMIN_CONTRASENA debe tener...` | La contraseña del ADMIN es muy corta o muy larga | Usa una de 8 a 72 caracteres |
 | `404` al consultar un usuario que sí existe | Es el perfil de otro usuario: solo puedes consultar el tuyo | Usa el `id` del usuario con el que iniciaste sesión (el `sub` del token) |
+| `404` "No hay ninguna orden tuya con el id..." | La orden es de otro usuario, o el id está mal copiado | Usa el `ordenId` que te devolvió `POST /api/ordenes`, con tu propio token |
+| `400` con "despues no es válido" | El cursor se cortó o se modificó al copiarlo | Copia el valor de `siguiente` completo, sin cambiarlo, o empieza de nuevo sin `despues` |
+| Las órdenes no llegan al motor y el log de order-service dice "Kafka no confirmó" o "No se pudo enviar" | Kafka está caído | Las órdenes están a salvo en la tabla `outbox`: levanta Kafka (`docker compose up -d kafka`) y salen solas |
 | `400` con "usuarioId ya no se envía" | La orden trae el `usuarioId` en el cuerpo, como antes del token | Quítalo: el usuario sale del token |
 | `401` con "Falta el token de acceso" | La petición no trae el header `Authorization: Bearer ...` | Inicia sesión (`POST /api/auth/login`) y envía el `tokenAcceso` |
 | `401` con "no es válido o ya venció" | Pasaron los 15 minutos, o reiniciaste auth-service (en desarrollo genera claves nuevas al arrancar) | Renueva con `POST /api/auth/refresh` o inicia sesión de nuevo |
@@ -252,20 +277,21 @@ Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
 
 ## Prueba de integración
 
-Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cuatro servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria), registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, inicia sesión, comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se envían una venta y una compra de ese instrumento que se cruzan, y se revisa que el motor registre la ejecución a nombre del usuario del token. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8083) y ten Docker abierto:
+Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cuatro servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria), registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, inicia sesión, comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se envían una venta y una compra de ese instrumento que se cruzan, y se revisa que sus comandos salgan del outbox y que el motor registre la ejecución a nombre del usuario del token. Las dos órdenes se consultan por id y página por página con el cursor, y otro usuario recibe 404. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8083) y ten Docker abierto:
 
 ```bash
 ./mvnw -B verify
 bash scripts/prueba-integracion.sh
 ```
 
-Debe terminar con `OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, las órdenes viajaron por Kafka y el motor las ejecutó`. Los logs quedan en `target/integracion/`.
+Debe terminar con `OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, las órdenes quedaron guardadas, viajaron por Kafka y el motor las ejecutó`. Los logs quedan en `target/integracion/`.
 
 GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba de integración en cada push y pull request a `main`.
 
 ## Siguientes pasos
 
-- **Outbox:** si Kafka está caído justo después de registrar a alguien, hoy el evento se pierde. La tabla OUTBOX del modelo entidad-relación guarda el evento junto con el usuario y lo publica después. Con los instrumentos el daño es menor, porque market-data-service vuelve a publicar todo el catálogo cada vez que arranca.
+- **Estados de la orden:** que el motor publique `orders.events` (en libro, parcial, ejecutada, cancelada) y order-service actualice el estado, la cantidad ejecutada y el precio promedio. Junto con eso, que el motor ignore un `ordenId` que ya procesó (RNF-09): el outbox entrega cada comando al menos una vez, y si order-service se cae justo después de que Kafka confirma, el comando se reenvía.
+- **Outbox en auth-service y market-data-service:** order-service ya lo usa. En auth-service, si Kafka está caído justo después de registrar a alguien, el evento se pierde. Con los instrumentos el daño es menor, porque market-data-service vuelve a publicar todo el catálogo cada vez que arranca.
 - **Acciones del bot creador de mercado (RF-59):** `instruments.events` ya lleva las acciones emitidas; falta que portfolio-service, cuando exista, se las asigne al bot al crear el instrumento.
 - **Precio de la orden (RF-16):** order-service ya guarda el tick de cada instrumento; falta rechazar precios que no sean múltiplo del tick o que estén a más de ±10 % del último precio.
 - **Límite de órdenes (RNF-24):** 20 órdenes por segundo por usuario en el gateway; el exceso recibe 429.
