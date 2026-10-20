@@ -153,7 +153,7 @@ class PublicadorOutboxIntegracionTest {
         ComandoOrden comando = ComandoOrden.nueva(USUARIO, "ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 10);
 
         assertThatThrownBy(() -> transaccion.executeWithoutResult(estado -> {
-            ordenes.save(Orden.nueva(comando, UUID.fromString(USUARIO), Instant.now().truncatedTo(ChronoUnit.MICROS)));
+            ordenes.save(Orden.nueva(comando, UUID.fromString(USUARIO), "clave-" + UUID.randomUUID(), Instant.now().truncatedTo(ChronoUnit.MICROS)));
             outbox.guardar(Topicos.ORDERS_COMMANDS, "ANDX", comando);
             throw new IllegalStateException("algo falla antes del commit");
         })).isInstanceOf(IllegalStateException.class);

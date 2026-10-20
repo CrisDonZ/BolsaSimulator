@@ -1,6 +1,7 @@
 ﻿# Envía varias órdenes de prueba a través del gateway (puerto 8080).
 # Inicia sesión con tu correo y contraseña (los del registro en POST /api/usuarios) y envía cada orden
 # con el token de acceso. Las órdenes no llevan el id del usuario: order-service lo toma del token.
+# Cada orden lleva su propia Idempotency-Key, así cada envío es una orden distinta.
 # Los símbolos deben ser de instrumentos activos: los 10 iniciales (ANDX, CAFE, BGUA, TAYR, QUIM, FLOR, COLB,
 # ARRA, SALV, PACF) o los que cree el ADMIN. Uno que no existe o está suspendido se rechaza con el motivo.
 #
@@ -67,8 +68,10 @@ foreach ($simbolo in $Simbolos) {
         }
 
         $detalle = if ($Tipo -eq "LIMITE") { "a $Precio" } else { "a mercado" }
+        # Una Idempotency-Key nueva por orden (HU-10): con la misma clave, order-service no crearía otra orden
+        $conClave = $cabeceras + @{ "Idempotency-Key" = [guid]::NewGuid().ToString() }
         try {
-            $respuesta = Invoke-RestMethod -Method Post -Uri "$gateway/api/ordenes" -Headers $cabeceras `
+            $respuesta = Invoke-RestMethod -Method Post -Uri "$gateway/api/ordenes" -Headers $conClave `
                 -ContentType "application/json" -Body ($orden | ConvertTo-Json)
             Write-Host "$Lado $Cantidad $simbolo $detalle #$i -> $($respuesta.mensaje)"
         } catch {

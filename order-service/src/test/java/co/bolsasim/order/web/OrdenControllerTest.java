@@ -55,6 +55,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.transaction.PlatformTransactionManager;
 
 /**
  * Prueba de la capa web con la seguridad real: los tokens se firman con la clave de prueba y
@@ -94,11 +95,58 @@ class OrdenControllerTest {
     @MockitoBean
     private RepositorioInstrumentos instrumentos;
 
+    // @WebMvcTest no levanta la base: las transacciones del servicio pasan por este doble
+    @MockitoBean
+    private PlatformTransactionManager transacciones;
+
     @BeforeEach
     void elUsuarioDelTokenEstaRegistradoYAndxEstaActivo() {
         when(usuarios.existsById(UUID.fromString(USUARIO))).thenReturn(true);
         when(instrumentos.findById("ANDX")).thenReturn(Optional.of(instrumento("ANDX", EstadoInstrumento.ACTIVO)));
-        when(ordenes.save(any())).thenAnswer(invocacion -> invocacion.getArgument(0));
+        when(ordenes.saveAndFlush(any())).thenAnswer(invocacion -> invocacion.getArgument(0));
+    }
+
+    @Test
+    void sinIdempotencyKeyResponde400YNoGuardaNada() throws Exception {
+        enviar(ORDEN, TokensDePrueba.valido(USUARIO), null)
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.title").value("Clave de idempotencia inválida"))
+                .andExpect(jsonPath("$.detail").value(startsWith("Falta el header Idempotency-Key")));
+        verifyNoInteractions(outbox, ordenes);
+    }
+
+    @Test
+    void elReintentoConLaMismaClaveRecibeLaRespuestaOriginalMarcadaComoRepetida() throws Exception {
+        String clave = UUID.randomUUID().toString();
+        Orden original = ordenDe(USUARIO, clave);
+        when(ordenes.findByUsuarioIdAndClaveIdempotencia(UUID.fromString(USUARIO), clave)).thenReturn(Optional.of(original));
+
+        enviar(ORDEN, TokensDePrueba.valido(USUARIO), clave)
+                .andExpect(status().isAccepted())
+                .andExpect(header().string(HttpHeaders.LOCATION, "/api/ordenes/" + original.getId()))
+                .andExpect(header().string(OrdenController.IDEMPOTENT_REPLAYED, "true"))
+                .andExpect(jsonPath("$.ordenId").value(original.getId().toString()))
+                .andExpect(jsonPath("$.mensaje").value("Orden recibida: va en camino al motor"));
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void unaOrdenNuevaNoTraeElHeaderDeRepetida() throws Exception {
+        enviar(ORDEN, TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isAccepted())
+                .andExpect(header().doesNotExist(OrdenController.IDEMPOTENT_REPLAYED));
+    }
+
+    @Test
+    void laMismaClaveConOtraOrdenResponde422() throws Exception {
+        String clave = UUID.randomUUID().toString();
+        when(ordenes.findByUsuarioIdAndClaveIdempotencia(UUID.fromString(USUARIO), clave))
+                .thenReturn(Optional.of(ordenDe(USUARIO, clave)));
+
+        enviar(ORDEN.replace("\"cantidad\":100", "\"cantidad\":300"), TokensDePrueba.valido(USUARIO), clave)
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.title").value("Clave de idempotencia ya usada"));
+        verifyNoInteractions(outbox);
     }
 
     @Test
@@ -329,10 +377,18 @@ class OrdenControllerTest {
         verifyNoInteractions(outbox);
     }
 
+    /** Envía la orden con una Idempotency-Key nueva, como un cliente que crea una orden distinta cada vez. */
     private ResultActions enviar(String cuerpo, String token) throws Exception {
+        return enviar(cuerpo, token, UUID.randomUUID().toString());
+    }
+
+    private ResultActions enviar(String cuerpo, String token, String clave) throws Exception {
         var peticion = post("/api/ordenes").contentType(MediaType.APPLICATION_JSON).content(cuerpo);
         if (token != null) {
             peticion.header(HttpHeaders.AUTHORIZATION, "Bearer " + token);
+        }
+        if (clave != null) {
+            peticion.header(OrdenController.IDEMPOTENCY_KEY, clave);
         }
         return mvc.perform(peticion);
     }
@@ -352,8 +408,13 @@ class OrdenControllerTest {
 
     /** Una orden PENDIENTE de ese usuario, como si viniera de la base. */
     private static Orden ordenDe(String usuarioId) {
+        return ordenDe(usuarioId, UUID.randomUUID().toString());
+    }
+
+    /** La misma orden que ORDEN (compra LIMITE de 100 ANDX a 5.000), creada con esa clave. */
+    private static Orden ordenDe(String usuarioId, String clave) {
         return Orden.nueva(ComandoOrden.nueva(usuarioId, "ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100),
-                UUID.fromString(usuarioId), Instant.now().truncatedTo(ChronoUnit.MICROS));
+                UUID.fromString(usuarioId), clave, Instant.now().truncatedTo(ChronoUnit.MICROS));
     }
 
     private void rechazado(ResultActions respuesta) throws Exception {

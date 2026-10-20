@@ -12,4 +12,7 @@ public interface RepositorioOrdenes extends JpaRepository<Orden, UUID> {
      * resultado, así la respuesta no revela qué órdenes existen (RNF-23).
      */
     Optional<Orden> findByIdAndUsuarioId(UUID id, UUID usuarioId);
+
+    /** La orden que ese usuario ya creó con esa clave de idempotencia, si existe (HU-10). */
+    Optional<Orden> findByUsuarioIdAndClaveIdempotencia(UUID usuarioId, String claveIdempotencia);
 }

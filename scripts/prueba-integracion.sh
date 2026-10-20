@@ -7,7 +7,8 @@
 # usuarioId en el cuerpo recibe 400. Después el ADMIN crea un instrumento nuevo con todo corriendo
 # (un inversionista recibe 403), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se
 # envían una venta y una compra de ese instrumento que se cruzan, y se comprueba que sus comandos salen del
-# outbox y que el motor registra la ejecución a nombre del usuario del token. Las órdenes se consultan por id
+# outbox y que el motor registra la ejecución a nombre del usuario del token; la compra se reenvía con la
+# misma Idempotency-Key y a orders.commands llega un solo comando. Las órdenes se consultan por id
 # y en la lista paginada, y otro usuario recibe 404. Por último renueva el token y comprueba que, después de
 # cerrar sesión, el token de refresco ya no sirve.
 #
@@ -45,16 +46,29 @@ esperar() {
     return 1
 }
 
-# Hace una petición al gateway y devuelve el código HTTP; el cuerpo queda en $LOGS/respuesta.json.
+# Una Idempotency-Key nueva con forma de UUID (Git Bash no trae uuidgen).
+nueva_clave() {
+    printf '%04x%04x-%04x-%04x-%04x-%04x%04x%04x' $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM
+}
+
+# Hace una petición al gateway y devuelve el código HTTP; el cuerpo queda en $LOGS/respuesta.json y los
+# headers en $LOGS/cabeceras.txt. Cada orden nueva (POST /api/ordenes) lleva una Idempotency-Key nueva;
+# CLAVE=... reenvía una clave en particular y CLAVE=ninguna la omite.
 # Uso: pedir MÉTODO RUTA [CUERPO] [TOKEN]
 pedir() {
     local metodo=$1 ruta=$2 cuerpo=${3:-} token=${4:-}
-    local argumentos=(-s -o "$LOGS/respuesta.json" -w "%{http_code}" -X "$metodo" "$GATEWAY$ruta")
+    local argumentos=(-s -o "$LOGS/respuesta.json" -D "$LOGS/cabeceras.txt" -w "%{http_code}" -X "$metodo" "$GATEWAY$ruta")
     if [ -n "$cuerpo" ]; then
         argumentos+=(-H "Content-Type: application/json" -d "$cuerpo")
     fi
     if [ -n "$token" ]; then
         argumentos+=(-H "Authorization: Bearer $token")
+    fi
+    if [ "$metodo" = POST ] && [ "$ruta" = /api/ordenes ]; then
+        local clave=${CLAVE:-$(nueva_clave)}
+        if [ "$clave" != ninguna ]; then
+            argumentos+=(-H "Idempotency-Key: $clave")
+        fi
     fi
     curl "${argumentos[@]}"
 }
@@ -205,13 +219,31 @@ echo "   suspendido 422 hasta que se reactiva; directo a order-service también 
 echo "7. Enviando con el token una venta y una compra de $SIMBOLO a 5000..."
 comprobar "Venta" "$(pedir POST /api/ordenes "${ORDEN/COMPRA/VENTA}" "$TOKEN")" 202
 VENTA=$(campo ordenId)
-comprobar "Compra" "$(pedir POST /api/ordenes "$ORDEN" "$TOKEN")" 202
+CLAVE_COMPRA=$(nueva_clave)
+comprobar "Compra" "$(CLAVE=$CLAVE_COMPRA pedir POST /api/ordenes "$ORDEN" "$TOKEN")" 202
 COMPRA=$(campo ordenId)
+# El doble clic: la misma compra con la misma clave recibe la misma orden y no crea otra
+comprobar "Compra repetida con la misma clave" "$(CLAVE=$CLAVE_COMPRA pedir POST /api/ordenes "$ORDEN" "$TOKEN")" 202
+grep -q "\"ordenId\":\"$COMPRA\"" "$LOGS/respuesta.json"
+grep -qi "^Idempotent-Replayed: true" "$LOGS/cabeceras.txt"
+OTRA_CANTIDAD=$(echo "$ORDEN" | sed 's/"cantidad":10/"cantidad":11/')
+comprobar "La misma clave con otra orden" "$(CLAVE=$CLAVE_COMPRA pedir POST /api/ordenes "$OTRA_CANTIDAD" "$TOKEN")" 422
+comprobar "Orden sin Idempotency-Key" "$(CLAVE=ninguna pedir POST /api/ordenes "$ORDEN" "$TOKEN")" 400
 
 # El comando sale del outbox; el motor anota el usuario de cada orden: solo puede venir del "sub" del token
 esperar "Ejecución: 10 acciones de $SIMBOLO a 5000 COP .*($ID)" "$LOGS/matching-engine.log" 30
 esperar "Evento .* del outbox publicado en orders.commands (clave $SIMBOLO" "$LOGS/order-service.log" 10
 echo "   Los comandos salieron del outbox y el motor ejecutó las órdenes a nombre del usuario del token"
+
+# La compra se envió dos veces con la misma clave: a orders.commands debe haber llegado un solo comando
+COMANDOS=$(MSYS_NO_PATHCONV=1 docker exec bolsasim-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+    --bootstrap-server localhost:9092 --topic orders.commands --from-beginning --timeout-ms 10000 \
+    2> /dev/null | grep -c "$COMPRA" || true)
+if [ "$COMANDOS" != 1 ]; then
+    echo "La compra repetida con la misma Idempotency-Key llegó $COMANDOS veces a orders.commands, no 1"
+    exit 1
+fi
+echo "   Compra repetida con la misma clave: 202 con la misma orden y un solo comando; otra orden con esa clave 422; sin clave 400"
 
 echo "   Consultando las órdenes guardadas..."
 comprobar "Consultar la compra" "$(pedir GET "/api/ordenes/$COMPRA" "" "$TOKEN")" 200

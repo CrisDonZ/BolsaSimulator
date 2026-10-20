@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -14,6 +15,7 @@ import co.bolsasim.eventos.Topicos;
 import co.bolsasim.eventos.UsuarioRegistrado;
 import co.bolsasim.order.instrumento.RepositorioInstrumentos;
 import co.bolsasim.order.usuario.RepositorioUsuarios;
+import co.bolsasim.order.web.OrdenController;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -94,11 +96,18 @@ class ValidacionUsuarioIntegracionTest {
         publicarInstrumento("ANDX", EstadoInstrumento.ACTIVO);
         UUID usuarioId = registrar();
 
-        var respuesta = enviarOrden(ORDEN, usuarioId)
+        String clave = UUID.randomUUID().toString();
+        var respuesta = enviarOrden(ORDEN, usuarioId, clave)
                 .andExpect(status().isAccepted())
                 .andReturn().getResponse();
         String ordenId = respuesta.getContentAsString().replaceAll(".*\"ordenId\":\"([^\"]+)\".*", "$1");
         assertThat(respuesta.getHeader(HttpHeaders.LOCATION)).isEqualTo("/api/ordenes/" + ordenId);
+
+        // El doble clic: la misma solicitud con la misma clave recibe la misma orden y no crea otro comando
+        enviarOrden(ORDEN, usuarioId, clave)
+                .andExpect(status().isAccepted())
+                .andExpect(header().string(OrdenController.IDEMPOTENT_REPLAYED, "true"))
+                .andExpect(jsonPath("$.ordenId").value(ordenId));
 
         // La orden quedó guardada: se puede consultar por id y aparece en la lista, PENDIENTE
         consultar("/api/ordenes/" + ordenId, usuarioId)
@@ -116,8 +125,8 @@ class ValidacionUsuarioIntegracionTest {
         consultar("/api/ordenes/" + ordenId, otro).andExpect(status().isNotFound());
         consultar("/api/ordenes", otro).andExpect(jsonPath("$.ordenes").isEmpty());
 
-        // El comando sale del outbox igual que antes: misma clave (símbolo), mismo header de tipo con el que el
-        // motor lo lee, y a nombre del "sub" del token
+        // El comando sale del outbox una sola vez, igual que antes: misma clave (símbolo), mismo header de tipo
+        // con el que el motor lo lee, y a nombre del "sub" del token
         ConsumerRecord<String, String> comando = comandoPublicado(ordenId);
         assertThat(comando.key()).isEqualTo("ANDX");
         assertThat(new String(comando.headers().lastHeader("__TypeId__").value(), StandardCharsets.UTF_8))
@@ -153,9 +162,7 @@ class ValidacionUsuarioIntegracionTest {
 
     @Test
     void unUsuarioQueNuncaSeRegistroRecibe422AunqueTengaUnTokenValido() throws Exception {
-        mvc.perform(post("/api/ordenes").contentType(MediaType.APPLICATION_JSON).content(ORDEN)
-                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + TokensDePrueba.valido(UUID.randomUUID().toString())))
-                .andExpect(status().isUnprocessableContent());
+        enviarOrden(ORDEN, UUID.randomUUID()).andExpect(status().isUnprocessableContent());
     }
 
     /** Publica un UsuarioRegistrado como auth-service y espera a que llegue a la copia local. */
@@ -177,9 +184,15 @@ class ValidacionUsuarioIntegracionTest {
                 .orElse(false));
     }
 
+    /** Envía la orden con una Idempotency-Key nueva: cada llamada es una orden distinta. */
     private ResultActions enviarOrden(String orden, UUID usuarioId) throws Exception {
+        return enviarOrden(orden, usuarioId, UUID.randomUUID().toString());
+    }
+
+    private ResultActions enviarOrden(String orden, UUID usuarioId, String clave) throws Exception {
         return mvc.perform(post("/api/ordenes").contentType(MediaType.APPLICATION_JSON).content(orden)
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + TokensDePrueba.valido(usuarioId.toString())));
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + TokensDePrueba.valido(usuarioId.toString()))
+                .header(OrdenController.IDEMPOTENCY_KEY, clave));
     }
 
     private ResultActions consultar(String ruta, UUID usuarioId) throws Exception {
@@ -200,15 +213,25 @@ class ValidacionUsuarioIntegracionTest {
         try (var consumidor = new KafkaConsumer<>(configuracion, new StringDeserializer(), new StringDeserializer())) {
             consumidor.subscribe(List.of(Topicos.ORDERS_COMMANDS));
             await().atMost(Duration.ofSeconds(30)).until(() -> {
-                consumidor.poll(Duration.ofMillis(500)).forEach(mensaje -> {
-                    if (mensaje.value().contains("\"ordenId\":\"" + ordenId + "\"")) {
-                        comandos.add(mensaje);
-                    }
-                });
+                leer(consumidor, ordenId, comandos);
                 return !comandos.isEmpty();
             });
+            // Sigue leyendo 2 segundos más (20 rondas del outbox): un comando repetido llegaría en ese tiempo
+            long hasta = System.currentTimeMillis() + 2_000;
+            while (System.currentTimeMillis() < hasta) {
+                leer(consumidor, ordenId, comandos);
+            }
         }
         assertThat(comandos).as("el comando de la orden sale una sola vez").hasSize(1);
         return comandos.getFirst();
+    }
+
+    private static void leer(KafkaConsumer<String, String> consumidor, String ordenId,
+                             List<ConsumerRecord<String, String>> comandos) {
+        consumidor.poll(Duration.ofMillis(200)).forEach(mensaje -> {
+            if (mensaje.value().contains("\"ordenId\":\"" + ordenId + "\"")) {
+                comandos.add(mensaje);
+            }
+        });
     }
 }

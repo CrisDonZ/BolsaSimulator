@@ -1,6 +1,7 @@
 package co.bolsasim.order.web;
 
 import co.bolsasim.order.orden.Orden;
+import co.bolsasim.order.servicio.OrdenCreada;
 import co.bolsasim.order.servicio.ServicioOrdenes;
 import jakarta.validation.Valid;
 import java.net.URI;
@@ -12,6 +13,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -20,6 +22,12 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/ordenes")
 public class OrdenController {
+
+    /** El header con el que el cliente identifica cada orden que quiere crear (borrador de la IETF). */
+    public static final String IDEMPOTENCY_KEY = "Idempotency-Key";
+
+    /** Avisa que la respuesta es la de una solicitud anterior con la misma clave (el nombre que usa Stripe). */
+    public static final String IDEMPOTENT_REPLAYED = "Idempotent-Replayed";
 
     private final ServicioOrdenes servicioOrdenes;
 
@@ -30,14 +38,21 @@ public class OrdenController {
     /**
      * Responde 202 Accepted y no 201 Created: la orden quedó guardada, pero el motor la procesa después,
      * de forma asíncrona. El header Location dice dónde consultar cómo va.
+     *
+     * <p>El header Idempotency-Key es obligatorio (HU-10): si la misma solicitud llega otra vez con la misma
+     * clave, la respuesta es exactamente la original, más el header Idempotent-Replayed: true.
      */
     @PostMapping
     public ResponseEntity<OrdenAceptadaResponse> crear(@AuthenticationPrincipal Jwt token,
+                                                       @RequestHeader(name = IDEMPOTENCY_KEY, required = false) String clave,
                                                        @Valid @RequestBody CrearOrdenRequest request) {
-        Orden orden = servicioOrdenes.crear(token.getSubject(), request);
-        return ResponseEntity.accepted()
-                .location(URI.create("/api/ordenes/" + orden.getId()))
-                .body(new OrdenAceptadaResponse(orden.getId(), orden.getSimbolo(), "Orden recibida: va en camino al motor"));
+        OrdenCreada creada = servicioOrdenes.crear(token.getSubject(), clave, request);
+        Orden orden = creada.orden();
+        var respuesta = ResponseEntity.accepted().location(URI.create("/api/ordenes/" + orden.getId()));
+        if (creada.repetida()) {
+            respuesta.header(IDEMPOTENT_REPLAYED, "true");
+        }
+        return respuesta.body(new OrdenAceptadaResponse(orden.getId(), orden.getSimbolo(), "Orden recibida: va en camino al motor"));
     }
 
     /** La orden de otro usuario responde 404, igual que una que no existe (RNF-23). */

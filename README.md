@@ -28,7 +28,7 @@ Postman / curl ──▶ gateway                            (puerto 8082) ──
 | Carpeta | Qué contiene |
 | --- | --- |
 | `eventos/` | Java puro, sin Spring: los eventos `ComandoOrden`, `UsuarioRegistrado` e `InstrumentoActualizado`, los enums y los nombres de tópicos. Lo comparten todos los servicios. |
-| `order-service/` | API REST `POST /api/ordenes` y la consulta de tus órdenes (`GET /api/ordenes`, paginada por cursor, y `GET /api/ordenes/{id}`, HU-09). Guarda cada orden en la tabla ORDEN y su comando en OUTBOX en la misma transacción; un publicador lo envía a Kafka cada 100 ms, así ningún comando se pierde si Kafka está caído (RNF-12). Vuelve a validar el JWT con la clave pública de auth-service y toma el usuario de la orden del token (`sub`), no del cuerpo. Escucha `users.registered` y `instruments.events` y guarda en su base una copia de los usuarios (tabla `usuario_registrado`) y de los instrumentos (tabla `instrumento`): acepta solo órdenes de usuarios registrados y de instrumentos activos. |
+| `order-service/` | API REST `POST /api/ordenes` y la consulta de tus órdenes (`GET /api/ordenes`, paginada por cursor, y `GET /api/ordenes/{id}`, HU-09). Guarda cada orden en la tabla ORDEN y su comando en OUTBOX en la misma transacción; un publicador lo envía a Kafka cada 100 ms, así ningún comando se pierde si Kafka está caído (RNF-12). Con el header `Idempotency-Key`, una orden enviada dos veces se crea una sola vez (HU-10). Vuelve a validar el JWT con la clave pública de auth-service y toma el usuario de la orden del token (`sub`), no del cuerpo. Escucha `users.registered` y `instruments.events` y guarda en su base una copia de los usuarios (tabla `usuario_registrado`) y de los instrumentos (tabla `instrumento`): acepta solo órdenes de usuarios registrados y de instrumentos activos. |
 | `market-data-service/` | Por ahora, solo el catálogo de instrumentos (HU-22): `GET /api/instrumentos` para cualquier usuario con token, y crear, editar, suspender y reactivar solo para el rol `ADMIN`. Guarda la tabla INSTRUMENTO en PostgreSQL con Flyway, arranca con 10 instrumentos ficticios y publica cada cambio en `instruments.events`. Valida el JWT por su cuenta. El último precio y las velas llegarán en el sprint 4. |
 | `matching-engine/` | El consumidor de Kafka y el libro de órdenes (`libro/`, Java puro con pruebas JUnit). |
 | `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. Vuelve a validar el JWT en las rutas protegidas: cada usuario solo consulta su propio perfil y solo cierra sus propias sesiones. Al arrancar crea el primer `ADMIN` con las variables `BOLSASIM_ADMIN_CORREO` y `BOLSASIM_ADMIN_CONTRASENA`. |
@@ -66,7 +66,7 @@ Si tu contenedor de PostgreSQL es de antes de market-data-service, no tiene la b
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 221 pruebas pasadas: 63 de order-service, 14 del libro de órdenes, 83 de auth-service, 42 de market-data-service y 19 del gateway. Las de integración de auth-service, order-service y market-data-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 241 pruebas pasadas: 83 de order-service, 14 del libro de órdenes, 83 de auth-service, 42 de market-data-service y 19 del gateway. Las de integración de auth-service, order-service y market-data-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -147,7 +147,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/auth/logout -Heade
 | `PUT /api/instrumentos/{simbolo}` | Sí, `ADMIN` | `200`. Solo cambian `nombre` y `sector`; si llega `tick`, `precioInicial`, `accionesEmitidas` o `simbolo`, responde `400` diciendo que no se puede cambiar. |
 | `POST /api/instrumentos/{simbolo}/suspender` y `/reactivar` | Sí, `ADMIN` | `200`. Suspendido, el instrumento rechaza órdenes nuevas con `422` (RF-29); reactivado, vuelve a aceptarlas. |
 | Las rutas de `ADMIN` con otro rol | Sí | `403` "Solo un administrador puede gestionar instrumentos.". No `404` como en los perfiles: el catálogo lo ve cualquiera, así que no hay nada que ocultar. |
-| `POST /api/ordenes` | Sí | `202` con el `ordenId` y el header `Location: /api/ordenes/{id}`. La orden queda guardada PENDIENTE aunque Kafka esté caído. |
+| `POST /api/ordenes` | Sí | `202` con el `ordenId` y el header `Location: /api/ordenes/{id}`. La orden queda guardada PENDIENTE aunque Kafka esté caído. Pide el header `Idempotency-Key` (`400` sin él); ver *Órdenes duplicadas* abajo. |
 | `GET /api/ordenes/{id}` | Sí | `200` con la orden: estado, cantidad ejecutada, precio promedio y fechas. La de otro usuario responde `404`, igual que una que no existe (RNF-23). |
 | `GET /api/ordenes?estado=…&tamano=…&despues=…` | Sí | `200` con `ordenes` (de la más reciente a la más vieja) y `siguiente`. Ver *Tus órdenes* abajo. |
 | Todas las rutas que piden token | Sí | Sin token, con el token vencido, con la firma alterada o de otro emisor: `401` del gateway, y la petición no llega al servicio. auth-service, order-service y market-data-service vuelven a validar el token: llamándolos directo al 8082, al 8081 o al 8083 también responden `401`. |
@@ -178,18 +178,20 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out clave-jwt.pem
 export AUTH_JWT_CLAVE_PRIVADA="$(cat clave-jwt.pem)"
 ```
 
-**10. Envía una orden** con el token del paso 9. No lleva el id del usuario: order-service lo toma del token, así nadie puede poner órdenes a nombre de otro (RNF-23).
+**10. Envía una orden** con el token del paso 9. No lleva el id del usuario: order-service lo toma del token, así nadie puede poner órdenes a nombre de otro (RNF-23). Sí lleva el header `Idempotency-Key`, una clave nueva por cada orden (ver *Órdenes duplicadas* abajo):
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/ordenes -Headers $auth -ContentType "application/json" `
+$clave = @{ "Idempotency-Key" = [guid]::NewGuid().ToString() }
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/ordenes -Headers ($auth + $clave) -ContentType "application/json" `
   -Body '{"simbolo":"ANDX","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":100}'
 ```
 
-Git Bash, macOS o Linux (cambia `TU-TOKEN`):
+Git Bash, macOS o Linux (cambia `TU-TOKEN`, y la clave en cada orden nueva):
 
 ```bash
 curl -X POST http://localhost:8080/api/ordenes \
   -H "Authorization: Bearer TU-TOKEN" \
+  -H "Idempotency-Key: 3f1c2b9e-7d4a-4e61-9a0b-5c8d2e7f1a64" \
   -H "Content-Type: application/json" \
   -d '{"simbolo":"ANDX","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":100}'
 ```
@@ -200,6 +202,8 @@ O con `enviar-ordenes.ps1`, que inicia sesión por ti: `.\enviar-ordenes.ps1 -Co
 
 - **Respuesta:** `202 Accepted` con el `ordenId` y el header `Location`. Es 202 y no 201 porque la orden quedó guardada, pero el motor la procesa después.
 - **Sin token o con el token vencido:** `401 Unauthorized` del gateway; la orden ni siquiera llega a order-service.
+- **Sin `Idempotency-Key`:** `400` "Falta el header Idempotency-Key", y no se guarda nada.
+- **La misma solicitud otra vez con la misma clave:** `202` con la misma orden y el header `Idempotent-Replayed: true`; no se crea otra orden ni otro comando.
 - **Si el cuerpo trae `usuarioId`** (o cualquier campo que no existe): `400 Bad Request` con "usuarioId ya no se envía: el usuario de la orden sale del token de acceso.", y la orden no se publica.
 - **Si el usuario del token todavía no está en order-service:** `422 Unprocessable Content` con el motivo, y la orden no se publica. order-service conoce a los usuarios por el tópico `users.registered`, así que justo después de registrarte puede tardar unos milisegundos en aceptarte.
 - **Si el instrumento no existe o está suspendido:** `422` con "El instrumento NADA no existe." o "El instrumento ANDX está suspendido: no recibe órdenes nuevas.", y la orden no se publica.
@@ -208,6 +212,22 @@ O con `enviar-ordenes.ps1`, que inicia sesión por ti: `.\enviar-ordenes.ps1 -Co
 - **Kafka UI:** en *Topics → orders.commands → Messages* aparece el mensaje en JSON.
 
 El número de partición puede ser otro; lo importante es lo que muestran los experimentos.
+
+## Órdenes duplicadas
+
+Un doble clic en Comprar, o una app que reintenta porque se cayó la red, enviaría la misma orden dos veces (HU-10). Para evitarlo, cada orden lleva el header `Idempotency-Key`: una clave que el cliente genera para cada orden que quiere crear (lo recomendado es un UUID) y repite tal cual si reenvía esa misma orden.
+
+| Llega | Responde |
+| --- | --- |
+| Una clave nueva | `202` y se crea la orden, como siempre. |
+| La misma clave con la misma orden | `202` con la orden original (mismo `ordenId` y `Location`) y el header `Idempotent-Replayed: true`. No se crea otra orden ni otro comando para el motor. Da lo mismo cuánto tiempo haya pasado o si el instrumento se suspendió después: es la misma orden. |
+| La misma clave con otra orden | `422` "Esa Idempotency-Key ya se usó para otra orden". |
+| Dos solicitudes con la misma clave al mismo tiempo | Las dos reciben `202` con la misma orden. La segunda espera unos milisegundos a que la primera termine. |
+| Sin header, o una clave que no tiene de 16 a 64 letras, números, `-` o `_` | `400`. |
+
+- **La clave es por usuario:** dos usuarios pueden usar la misma sin chocar, y nadie obtiene la orden de otro adivinando su clave.
+- **Una orden rechazada no gasta la clave:** si responde `400` o `422`, no se guardó nada; corrígela y reenvíala con la misma clave.
+- **Cómo se garantiza:** la clave se guarda en la orden, con un índice único `(usuario_id, clave_idempotencia)`. Antes de crear la orden se busca la clave; si dos solicitudes llegan a la vez, ninguna ve a la otra, y ahí decide el índice: PostgreSQL hace esperar a la segunda hasta que la primera confirma y entonces la rechaza, y order-service responde con la orden de la primera. Una prueba lo reproduce de forma exacta: deja la primera sin confirmar y comprueba que la segunda espera.
 
 ## Tus órdenes
 
@@ -248,6 +268,9 @@ Cada orden queda guardada con su estado. Por ahora todas quedan `PENDIENTE`: los
 | auth-service no arranca: `BOLSASIM_ADMIN_CONTRASENA debe tener...` | La contraseña del ADMIN es muy corta o muy larga | Usa una de 8 a 72 caracteres |
 | `404` al consultar un usuario que sí existe | Es el perfil de otro usuario: solo puedes consultar el tuyo | Usa el `id` del usuario con el que iniciaste sesión (el `sub` del token) |
 | `404` "No hay ninguna orden tuya con el id..." | La orden es de otro usuario, o el id está mal copiado | Usa el `ordenId` que te devolvió `POST /api/ordenes`, con tu propio token |
+| `400` con "Falta el header Idempotency-Key" | La orden no trae la clave de idempotencia (antes de HU-10 no hacía falta) | Envía `Idempotency-Key` con una clave nueva por orden, por ejemplo un UUID |
+| `422` con "Esa Idempotency-Key ya se usó para otra orden" | Reusaste la clave de una orden anterior para una orden distinta | Genera una clave nueva para cada orden; la misma clave solo sirve para reenviar la misma orden |
+| Envías una orden y no aparece una nueva, pero responde `202` | Reenviaste una clave que ya usaste con esa misma orden: recibes la original (mira el header `Idempotent-Replayed`) | Cambia la clave si de verdad quieres otra orden igual |
 | `400` con "despues no es válido" | El cursor se cortó o se modificó al copiarlo | Copia el valor de `siguiente` completo, sin cambiarlo, o empieza de nuevo sin `despues` |
 | Las órdenes no llegan al motor y el log de order-service dice "Kafka no confirmó" o "No se pudo enviar" | Kafka está caído | Las órdenes están a salvo en la tabla `outbox`: levanta Kafka (`docker compose up -d kafka`) y salen solas |
 | `400` con "usuarioId ya no se envía" | La orden trae el `usuarioId` en el cuerpo, como antes del token | Quítalo: el usuario sale del token |
@@ -277,7 +300,7 @@ Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
 
 ## Prueba de integración
 
-Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cuatro servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria), registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, inicia sesión, comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se envían una venta y una compra de ese instrumento que se cruzan, y se revisa que sus comandos salgan del outbox y que el motor registre la ejecución a nombre del usuario del token. Las dos órdenes se consultan por id y página por página con el cursor, y otro usuario recibe 404. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8083) y ten Docker abierto:
+Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cuatro servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria), registra un usuario, comprueba que su evento llegue a `users.registered` y a order-service, inicia sesión, comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se envían una venta y una compra de ese instrumento que se cruzan, y se revisa que sus comandos salgan del outbox y que el motor registre la ejecución a nombre del usuario del token. La compra se reenvía con la misma `Idempotency-Key` y se comprueba que a `orders.commands` llega un solo comando. Las dos órdenes se consultan por id y página por página con el cursor, y otro usuario recibe 404. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8083) y ten Docker abierto:
 
 ```bash
 ./mvnw -B verify
