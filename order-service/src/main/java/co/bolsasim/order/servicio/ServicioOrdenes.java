@@ -19,8 +19,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.regex.Pattern;
+import org.hibernate.exception.ConstraintViolationException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Reglas de negocio de las órdenes. No sabe nada de Kafka: guarda la orden y deja su comando en el outbox,
@@ -33,46 +38,126 @@ public class ServicioOrdenes {
     public static final int TAMANO_POR_DEFECTO = 20;
     public static final int TAMANO_MAXIMO = 100;
 
+    /** Nombre del índice único (usuario_id, clave_idempotencia) de V5__clave_idempotencia.sql. */
+    static final String INDICE_CLAVE = "orden_usuario_clave";
+
+    // De 16 a 64 caracteres (la columna es VARCHAR(64)): un UUID tiene 36. El mínimo evita claves como "1",
+    // que un usuario repetiría sin querer en dos órdenes distintas
+    private static final Pattern FORMATO_CLAVE = Pattern.compile("[A-Za-z0-9_-]{16,64}");
+
     private final RepositorioOrdenes ordenes;
     private final ConsultaOrdenes consulta;
     private final Outbox outbox;
     private final RepositorioUsuarios usuarios;
     private final RepositorioInstrumentos instrumentos;
+    private final TransactionTemplate transaccion;
+    private final TransactionTemplate lectura;
 
     public ServicioOrdenes(RepositorioOrdenes ordenes, ConsultaOrdenes consulta, Outbox outbox,
-                           RepositorioUsuarios usuarios, RepositorioInstrumentos instrumentos) {
+                           RepositorioUsuarios usuarios, RepositorioInstrumentos instrumentos,
+                           PlatformTransactionManager transacciones) {
         this.ordenes = ordenes;
         this.consulta = consulta;
         this.outbox = outbox;
         this.usuarios = usuarios;
         this.instrumentos = instrumentos;
+        this.transaccion = new TransactionTemplate(transacciones);
+        this.lectura = new TransactionTemplate(transacciones);
+        this.lectura.setReadOnly(true);
     }
 
     /**
      * Guarda la orden PENDIENTE y su comando NUEVA en el outbox, en la misma transacción (RNF-12): si Kafka
      * está caído, la orden igual queda y su comando sale cuando Kafka vuelva. Si una validación falla, no se
-     * guarda nada: nunca llegó a ser una orden.
+     * guarda nada: nunca llegó a ser una orden, y la clave queda libre para reenviarla corregida.
      *
-     * @param usuarioId el "sub" del token de acceso: quien pone la orden es quien inició sesión
+     * <p>Si la misma solicitud ya llegó con esa clave, devuelve la orden original sin crear nada (HU-10). Se
+     * busca antes de las reglas de negocio: si el instrumento se suspendió después, el reintento igual recibe
+     * su orden, porque no es una orden nueva.
+     *
+     * <p>Dos solicitudes con la misma clave al mismo tiempo (el doble clic) no se ven entre sí en la búsqueda.
+     * Ahí decide el índice único: PostgreSQL hace esperar a la segunda hasta que la primera termina y, si la
+     * primera se guardó, la rechaza. Entonces la segunda lee la orden de la primera y responde con ella.
+     *
+     * @param usuarioId         el "sub" del token de acceso: quien pone la orden es quien inició sesión
+     * @param claveIdempotencia el header Idempotency-Key
      */
-    @Transactional
-    public Orden crear(String usuarioId, CrearOrdenRequest request) {
+    public OrdenCreada crear(String usuarioId, String claveIdempotencia, CrearOrdenRequest request) {
+        String clave = validarClave(claveIdempotencia);
         validarPrecio(request);
-        UUID usuario = validarUsuario(usuarioId);
+        UUID usuario = comoUuid(usuarioId).orElseThrow(() -> new UsuarioNoRegistradoException(usuarioId));
+
+        try {
+            return transaccion.execute(estado -> ordenes.findByUsuarioIdAndClaveIdempotencia(usuario, clave)
+                    .map(original -> repetida(original, request))
+                    .orElseGet(() -> nueva(usuario, clave, request)));
+        } catch (DataIntegrityViolationException e) {
+            if (!esLaClaveRepetida(e)) {
+                throw e;
+            }
+            // La otra solicitud con esta clave ya confirmó (por eso falló esta): su orden ya se puede leer
+            return lectura.execute(estado -> ordenes.findByUsuarioIdAndClaveIdempotencia(usuario, clave)
+                    .map(original -> repetida(original, request))
+                    .orElseThrow(() -> e));
+        }
+    }
+
+    private OrdenCreada nueva(UUID usuario, String clave, CrearOrdenRequest request) {
+        validarUsuario(usuario);
         validarInstrumento(request.simbolo().toUpperCase(Locale.ROOT));
 
         ComandoOrden comando = ComandoOrden.nueva(
-                usuarioId,
+                usuario.toString(),
                 request.simbolo(),
                 request.lado(),
                 request.tipo(),
                 request.precioLimite(),
                 request.cantidad());
 
-        Orden orden = ordenes.save(Orden.nueva(comando, usuario, Instant.now().truncatedTo(ChronoUnit.MICROS)));
-        // La clave es el símbolo, como antes: el motor recibe las órdenes de ANDX en el orden en que llegaron
+        // saveAndFlush: el INSERT va antes que el outbox, así el choque con otra solicitud de la misma clave
+        // se resuelve aquí, antes de escribir el comando
+        Orden orden = ordenes.saveAndFlush(
+                Orden.nueva(comando, usuario, clave, Instant.now().truncatedTo(ChronoUnit.MICROS)));
+        // La clave del mensaje es el símbolo, como antes: el motor recibe las órdenes de ANDX en el orden en que
+        // llegaron
         outbox.guardar(Topicos.ORDERS_COMMANDS, comando.simbolo(), comando);
-        return orden;
+        return new OrdenCreada(orden, false);
+    }
+
+    /** La misma clave solo vale para la misma orden: con otro cuerpo es un error del cliente, no un reintento. */
+    private static OrdenCreada repetida(Orden original, CrearOrdenRequest request) {
+        boolean mismaOrden = original.esLaMismaOrden(request.simbolo().toUpperCase(Locale.ROOT), request.lado(),
+                request.tipo(), request.precioLimite(), request.cantidad());
+        if (!mismaOrden) {
+            throw new ClaveIdempotenciaReusadaException();
+        }
+        return new OrdenCreada(original, true);
+    }
+
+    private static boolean esLaClaveRepetida(DataIntegrityViolationException e) {
+        for (Throwable causa = e; causa != null; causa = causa.getCause()) {
+            if (causa instanceof ConstraintViolationException violacion) {
+                return INDICE_CLAVE.equalsIgnoreCase(violacion.getConstraintName());
+            }
+        }
+        return false;
+    }
+
+    /** Acepta la clave sola o entre comillas, que es la forma del borrador de la IETF para este header. */
+    private static String validarClave(String claveIdempotencia) {
+        if (claveIdempotencia == null || claveIdempotencia.isBlank()) {
+            throw new ClaveIdempotenciaInvalidaException("Falta el header Idempotency-Key: envía un identificador "
+                    + "único por cada orden, por ejemplo un UUID.");
+        }
+        String clave = claveIdempotencia.trim();
+        if (clave.length() >= 2 && clave.startsWith("\"") && clave.endsWith("\"")) {
+            clave = clave.substring(1, clave.length() - 1);
+        }
+        if (!FORMATO_CLAVE.matcher(clave).matches()) {
+            throw new ClaveIdempotenciaInvalidaException("Idempotency-Key debe tener de 16 a 64 letras, números, "
+                    + "- o _; por ejemplo un UUID.");
+        }
+        return clave;
     }
 
     /** La orden de otro usuario responde lo mismo que una que no existe (RNF-23). */
@@ -136,12 +221,10 @@ public class ServicioOrdenes {
      * milisegundos antes de que llegue su evento. Un id que ni siquiera es un UUID tampoco puede ser
      * un usuario registrado.
      */
-    private UUID validarUsuario(String usuarioId) {
-        UUID id = comoUuid(usuarioId).orElseThrow(() -> new UsuarioNoRegistradoException(usuarioId));
-        if (!usuarios.existsById(id)) {
-            throw new UsuarioNoRegistradoException(usuarioId);
+    private void validarUsuario(UUID usuario) {
+        if (!usuarios.existsById(usuario)) {
+            throw new UsuarioNoRegistradoException(usuario.toString());
         }
-        return id;
     }
 
     private static Optional<UUID> comoUuid(String usuarioId) {

@@ -1,5 +1,7 @@
 package co.bolsasim.order.web;
 
+import co.bolsasim.order.servicio.ClaveIdempotenciaInvalidaException;
+import co.bolsasim.order.servicio.ClaveIdempotenciaReusadaException;
 import co.bolsasim.order.servicio.ConsultaInvalidaException;
 import co.bolsasim.order.servicio.InstrumentoNoDisponibleException;
 import co.bolsasim.order.servicio.OrdenInvalidaException;
@@ -51,6 +53,21 @@ public class ManejadorErrores {
     public ProblemDetail instrumentoNoDisponible(InstrumentoNoDisponibleException e) {
         ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
         problema.setTitle("Instrumento no disponible");
+        return problema;
+    }
+
+    @ExceptionHandler(ClaveIdempotenciaInvalidaException.class)
+    public ProblemDetail claveInvalida(ClaveIdempotenciaInvalidaException e) {
+        ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, e.getMessage());
+        problema.setTitle("Clave de idempotencia inválida");
+        return problema;
+    }
+
+    /** 422 como dice el borrador de la IETF: la clave es válida, pero ya pertenece a otra orden. */
+    @ExceptionHandler(ClaveIdempotenciaReusadaException.class)
+    public ProblemDetail claveReusada(ClaveIdempotenciaReusadaException e) {
+        ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
+        problema.setTitle("Clave de idempotencia ya usada");
         return problema;
     }
 

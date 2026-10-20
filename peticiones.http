@@ -3,7 +3,14 @@
 ###
 ### Todo pasa por el gateway (puerto 8080), que exige un token salvo para registrarse, iniciar sesión,
 ### renovar el token y leer la clave pública. Una orden de un instrumento que no existe o está suspendido
-### responde 422. Orden de uso:
+### responde 422.
+###
+### Cada orden lleva el header Idempotency-Key (HU-10): una clave única por orden, de 16 a 64 letras, números,
+### - o _ (por ejemplo un UUID). Si envías la misma petición otra vez con la misma clave, NO se crea otra orden:
+### recibes la original con el header "Idempotent-Replayed: true". Para crear otra orden, cambia la clave
+### (por ejemplo, el número del final).
+###
+### Orden de uso:
 ###   1. Envía la petición 1 (registrar) y pega el "id" de la respuesta en @usuarioId (solo lo usa la 5:
 ###      las órdenes no lo llevan, porque order-service toma el usuario del token).
 ###   2. Envía la petición 3 (login) y pega el "tokenAcceso" en @token y el "tokenRefresco" en @tokenRefresco.
@@ -68,8 +75,10 @@ GET {{gateway}}/api/usuarios/{{usuarioId}}
 Authorization: Bearer {{token}}
 
 ### 6. Compra límite: 100 acciones de ANDX pagando máximo 5.000 COP cada una (a nombre del usuario del token).
-###    Responde 202 con el "ordenId": pégalo en @ordenId para consultarla con la 29.
+###    Responde 202 con el "ordenId": pégalo en @ordenId para consultarla con la 29. Envíala dos veces: la
+###    segunda responde la misma orden con "Idempotent-Replayed: true", y no se crea otra.
 POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-06-cambia-esta-clave
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
@@ -83,6 +92,7 @@ Content-Type: application/json
 
 ### 7. Venta límite de otro símbolo (puede caer en otra partición)
 POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-07-cambia-esta-clave
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
@@ -96,6 +106,7 @@ Content-Type: application/json
 
 ### 8. Compra a mercado: sin precioLimite
 POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-08-cambia-esta-clave
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
@@ -108,6 +119,7 @@ Content-Type: application/json
 
 ### 9. Error a propósito: orden sin token -> 401 Unauthorized (el gateway la detiene; no llega a order-service)
 POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-09-cambia-esta-clave
 Content-Type: application/json
 
 {
@@ -120,6 +132,7 @@ Content-Type: application/json
 
 ### 10. Error a propósito: orden LIMITE sin precio -> 400 Bad Request
 POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-10-cambia-esta-clave
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
@@ -132,6 +145,7 @@ Content-Type: application/json
 
 ### 11. Error a propósito: cantidad 0 y símbolo demasiado largo -> 400 Bad Request
 POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-11-cambia-esta-clave
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
@@ -146,6 +160,7 @@ Content-Type: application/json
 ### 12. Error a propósito: orden a nombre de otro usuario -> 400 "usuarioId ya no se envía". La orden siempre es
 ###     del usuario del token; si el cuerpo trae usuarioId (o cualquier campo que no existe), se rechaza.
 POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-12-cambia-esta-clave
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
@@ -287,3 +302,31 @@ Authorization: Bearer {{token}}
 ### 30. Error a propósito: más de 100 por página -> 400 "tamano debe estar entre 1 y 100."
 GET {{gateway}}/api/ordenes?tamano=500
 Authorization: Bearer {{token}}
+
+### 31. Error a propósito: orden sin Idempotency-Key -> 400 "Falta el header Idempotency-Key"
+POST {{gateway}}/api/ordenes
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "simbolo": "ANDX",
+  "lado": "COMPRA",
+  "tipo": "LIMITE",
+  "precioLimite": 5000,
+  "cantidad": 100
+}
+
+### 32. Error a propósito: la clave de la 6 con otra orden (300 acciones en vez de 100) -> 422
+###     "Esa Idempotency-Key ya se usó para otra orden". Envía antes la 6.
+POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-06-cambia-esta-clave
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "simbolo": "ANDX",
+  "lado": "COMPRA",
+  "tipo": "LIMITE",
+  "precioLimite": 5000,
+  "cantidad": 300
+}

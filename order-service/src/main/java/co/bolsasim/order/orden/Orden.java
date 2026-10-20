@@ -14,6 +14,7 @@ import jakarta.persistence.Transient;
 import jakarta.persistence.Version;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 import org.springframework.data.domain.Persistable;
 
@@ -57,6 +58,9 @@ public class Orden implements Persistable<UUID> {
 
     private String motivo;
 
+    @Column(name = "clave_idempotencia")
+    private String claveIdempotencia;
+
     @Column(name = "creada_en")
     private Instant creadaEn;
 
@@ -73,9 +77,10 @@ public class Orden implements Persistable<UUID> {
         // Lo usa JPA al leer de la base
     }
 
-    private Orden(ComandoOrden comando, UUID usuarioId, Instant ahora) {
+    private Orden(ComandoOrden comando, UUID usuarioId, String claveIdempotencia, Instant ahora) {
         this.id = comando.ordenId();
         this.usuarioId = usuarioId;
+        this.claveIdempotencia = claveIdempotencia;
         this.simbolo = comando.simbolo();
         this.lado = comando.lado();
         this.tipo = comando.tipo();
@@ -90,10 +95,21 @@ public class Orden implements Persistable<UUID> {
     /**
      * La orden que corresponde a un comando NUEVA: empieza PENDIENTE y sin nada ejecutado.
      *
-     * @param ahora en microsegundos, como lo guarda PostgreSQL: es parte del cursor de la paginación
+     * @param claveIdempotencia la del header Idempotency-Key: si la misma solicitud llega otra vez, se
+     *                          devuelve esta orden en vez de crear otra (HU-10)
+     * @param ahora             en microsegundos, como lo guarda PostgreSQL: es parte del cursor de la paginación
      */
-    public static Orden nueva(ComandoOrden comando, UUID usuarioId, Instant ahora) {
-        return new Orden(comando, usuarioId, ahora);
+    public static Orden nueva(ComandoOrden comando, UUID usuarioId, String claveIdempotencia, Instant ahora) {
+        return new Orden(comando, usuarioId, claveIdempotencia, ahora);
+    }
+
+    /**
+     * Si otra solicitud con la misma clave pide exactamente esta orden. El símbolo ya viene en mayúsculas:
+     * "andx" y "ANDX" son la misma orden.
+     */
+    public boolean esLaMismaOrden(String simbolo, Lado lado, TipoOrden tipo, Long precioLimite, int cantidad) {
+        return this.simbolo.equals(simbolo) && this.lado == lado && this.tipo == tipo
+                && Objects.equals(this.precioLimite, precioLimite) && this.cantidad == cantidad;
     }
 
     @Override
@@ -150,6 +166,10 @@ public class Orden implements Persistable<UUID> {
 
     public String getMotivo() {
         return motivo;
+    }
+
+    public String getClaveIdempotencia() {
+        return claveIdempotencia;
     }
 
     public Instant getCreadaEn() {
