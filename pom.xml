@@ -29,6 +29,7 @@
         <module>order-service</module>
         <module>matching-engine</module>
         <module>auth-service</module>
+        <module>market-data-service</module>
         <module>gateway</module>
     </modules>
 

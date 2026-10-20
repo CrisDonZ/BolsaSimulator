@@ -2,15 +2,21 @@
 ### en VS Code, con la extensión REST Client, haz clic en "Send Request".
 ###
 ### Todo pasa por el gateway (puerto 8080), que exige un token salvo para registrarse, iniciar sesión,
-### renovar el token y leer la clave pública. Orden de uso:
+### renovar el token y leer la clave pública. Una orden de un instrumento que no existe o está suspendido
+### responde 422. Orden de uso:
 ###   1. Envía la petición 1 (registrar) y pega el "id" de la respuesta en @usuarioId (solo lo usa la 5:
 ###      las órdenes no lo llevan, porque order-service toma el usuario del token).
 ###   2. Envía la petición 3 (login) y pega el "tokenAcceso" en @token y el "tokenRefresco" en @tokenRefresco.
-###   3. Ya puedes enviar órdenes. El token de acceso dura 15 minutos: si recibes 401, usa la 13 o la 3 otra vez.
+###   3. Ya puedes enviar órdenes de los 10 instrumentos iniciales (ANDX, CAFE, BGUA, TAYR, QUIM, FLOR, COLB,
+###      ARRA, SALV y PACF). El token de acceso dura 15 minutos: si recibes 401, usa la 13 o la 3 otra vez.
+###   4. Para gestionar instrumentos (17 a 25) necesitas el ADMIN: arranca auth-service con las variables
+###      BOLSASIM_ADMIN_CORREO y BOLSASIM_ADMIN_CONTRASENA (ver el README), cambia el correo y la contraseña
+###      de la 17 por esos y pega su "tokenAcceso" en @tokenAdmin.
 @gateway = http://localhost:8080
 @usuarioId = PEGA-AQUI-EL-ID-DEL-USUARIO
 @token = PEGA-AQUI-EL-TOKEN-DE-ACCESO
 @tokenRefresco = PEGA-AQUI-EL-TOKEN-DE-REFRESCO
+@tokenAdmin = PEGA-AQUI-EL-TOKEN-DEL-ADMIN
 
 ### 1. Registrar un usuario (no necesita token). Pega el "id" de la respuesta en @usuarioId.
 POST {{gateway}}/api/usuarios
@@ -171,3 +177,88 @@ GET {{gateway}}/.well-known/jwks.json
 
 ### 16. La misma clave en la ruta de Spring Authorization Server (alias de la 15)
 GET {{gateway}}/oauth2/jwks
+
+### 17. Iniciar sesión como ADMIN (HU-22). Usa el correo y la contraseña de las variables con que arrancaste
+###     auth-service, y pega el "tokenAcceso" de la respuesta en @tokenAdmin.
+POST {{gateway}}/api/auth/login
+Content-Type: application/json
+
+{
+  "correo": "admin@bolsasim.co",
+  "contrasena": "LA-DE-BOLSASIM_ADMIN_CONTRASENA"
+}
+
+### 18. Catálogo de instrumentos (cualquier usuario con token) -> 200 con los 10 iniciales y su estado
+GET {{gateway}}/api/instrumentos
+Authorization: Bearer {{token}}
+
+### 19. Crear un instrumento (solo ADMIN) -> 201. Desde ya se pueden enviar órdenes de MANGO, sin reiniciar nada.
+POST {{gateway}}/api/instrumentos
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "simbolo": "MANGO",
+  "nombre": "Frutas del Magdalena",
+  "sector": "Agro",
+  "precioInicial": 2000,
+  "tick": 5,
+  "accionesEmitidas": 1500000
+}
+
+### 20. Error a propósito: crear MANGO otra vez -> 409 "Ese símbolo ya existe"
+POST {{gateway}}/api/instrumentos
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "simbolo": "MANGO",
+  "nombre": "Otra empresa",
+  "sector": "Agro",
+  "precioInicial": 2000,
+  "tick": 5,
+  "accionesEmitidas": 1000
+}
+
+### 21. Error a propósito: un inversionista intenta crear un instrumento -> 403 "Solo un administrador..."
+POST {{gateway}}/api/instrumentos
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "simbolo": "PIRA",
+  "nombre": "Empresa pirata",
+  "sector": "Ninguno",
+  "precioInicial": 100,
+  "tick": 1,
+  "accionesEmitidas": 1
+}
+
+### 22. Editar un instrumento (solo ADMIN): solo nombre y sector -> 200
+PUT {{gateway}}/api/instrumentos/MANGO
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "nombre": "Frutas del Magdalena S.A.",
+  "sector": "Agro"
+}
+
+### 23. Error a propósito: cambiar el tick -> 400 "tick no se puede cambiar"
+PUT {{gateway}}/api/instrumentos/MANGO
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "nombre": "Frutas del Magdalena S.A.",
+  "sector": "Agro",
+  "tick": 10
+}
+
+### 24. Suspender (solo ADMIN) -> 200. Desde ya, una orden de MANGO responde 422 "está suspendido".
+POST {{gateway}}/api/instrumentos/MANGO/suspender
+Authorization: Bearer {{tokenAdmin}}
+
+### 25. Reactivar (solo ADMIN) -> 200. Las órdenes de MANGO vuelven a pasar.
+POST {{gateway}}/api/instrumentos/MANGO/reactivar
+Authorization: Bearer {{tokenAdmin}}

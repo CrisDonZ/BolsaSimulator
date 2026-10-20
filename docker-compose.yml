@@ -40,7 +40,7 @@ services:
       retries: 12
       start_period: 15s
 
-  # Crea los tópicos con 6 particiones y termina.
+  # Crea los tópicos con 6 particiones y termina. Si ya existen, no los toca.
   kafka-init:
     image: apache/kafka:4.2.1
     container_name: bolsasim-kafka-init
@@ -54,6 +54,10 @@ services:
           --topic orders.commands --partitions 6 --replication-factor 1
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \
           --topic users.registered --partitions 6 --replication-factor 1
+        # Compactado: Kafka conserva para siempre el último mensaje de cada símbolo, así un servicio
+        # nuevo lee el catálogo completo desde el principio sin recorrer todo el historial
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \
+          --topic instruments.events --partitions 6 --replication-factor 1 --config cleanup.policy=compact
         echo "Tópicos listos:"
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --list
     restart: "no"

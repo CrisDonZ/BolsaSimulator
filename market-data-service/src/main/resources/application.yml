@@ -1,0 +1,40 @@
+server:
+  port: 8083
+
+bolsasim:
+  servicios:
+    auth: ${AUTH_SERVICE_URL:http://localhost:8082}
+  jwt:
+    # Clave pública con la que se verifica la firma de los tokens. Se descarga en la primera petición
+    # y queda en caché, así market-data-service arranca aunque auth-service todavía no esté listo.
+    jwk-set-uri: ${bolsasim.servicios.auth}/.well-known/jwks.json
+    emisor: bolsasim-auth
+
+spring:
+  application:
+    name: market-data-service
+  datasource:
+    # Base "mercado" del PostgreSQL de docker-compose.yml (puerto 5433 en tu computador).
+    # Los valores por defecto sirven solo en desarrollo; en otro entorno van en variables de entorno.
+    url: ${MERCADO_DB_URL:jdbc:postgresql://localhost:5433/mercado}
+    username: ${MERCADO_DB_USUARIO:bolsasim}
+    password: ${MERCADO_DB_CLAVE:bolsasim}
+  jackson:
+    deserialization:
+      # Un campo que no existe (o que no se puede editar, como el tick) es un error 400,
+      # no algo que se ignora en silencio (RNF-25)
+      fail-on-unknown-properties: true
+  jpa:
+    # Las tablas las crea Flyway; Hibernate solo comprueba que coincidan con las entidades
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  kafka:
+    # Dirección de Kafka vista desde tu computador (ver docker-compose.yml)
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # Convierte el record InstrumentoActualizado a JSON con Jackson 3
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      # Kafka confirma el mensaje solo cuando quedó guardado de forma segura
+      acks: all

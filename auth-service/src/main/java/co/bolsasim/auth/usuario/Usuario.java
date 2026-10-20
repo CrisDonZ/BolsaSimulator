@@ -67,6 +67,11 @@ public class Usuario {
         return new Usuario(nombre, alias, correo, passwordHash, Rol.INVERSIONISTA, ahora);
     }
 
+    /** El primer administrador, que auth-service crea al arrancar (ver PrimerAdministrador). */
+    public static Usuario nuevoAdmin(String nombre, String alias, String correo, String passwordHash, Instant ahora) {
+        return new Usuario(nombre, alias, correo, passwordHash, Rol.ADMIN, ahora);
+    }
+
     public UUID getId() {
         return id;
     }

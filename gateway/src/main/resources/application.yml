@@ -7,6 +7,7 @@ bolsasim:
     # Dónde están los servicios. En otro entorno van en variables de entorno.
     auth: ${AUTH_SERVICE_URL:http://localhost:8082}
     ordenes: ${ORDER_SERVICE_URL:http://localhost:8081}
+    mercado: ${MARKET_DATA_SERVICE_URL:http://localhost:8083}
   jwt:
     # Clave pública con la que auth-service firma los tokens (se descarga una vez y se guarda en memoria)
     jwk-set-uri: ${bolsasim.servicios.auth}/.well-known/jwks.json
@@ -30,6 +31,10 @@ spring:
               uri: ${bolsasim.servicios.ordenes}
               predicates:
                 - Path=/api/ordenes/**
+            - id: market-data-service
+              uri: ${bolsasim.servicios.mercado}
+              predicates:
+                - Path=/api/instrumentos/**
 
 logging:
   level:

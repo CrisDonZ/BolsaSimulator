@@ -12,7 +12,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import co.bolsasim.eventos.ComandoOrden;
+import co.bolsasim.eventos.EstadoInstrumento;
+import co.bolsasim.eventos.InstrumentoActualizado;
 import co.bolsasim.order.TokensDePrueba;
+import co.bolsasim.order.instrumento.Instrumento;
+import co.bolsasim.order.instrumento.RepositorioInstrumentos;
 import co.bolsasim.order.seguridad.ConfiguracionSeguridad;
 import co.bolsasim.order.seguridad.RespuestaNoAutorizado;
 import co.bolsasim.order.servicio.PublicadorOrdenes;
@@ -23,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -41,8 +46,8 @@ import org.springframework.test.web.servlet.ResultActions;
 /**
  * Prueba de la capa web con la seguridad real: los tokens se firman con la clave de prueba y
  * order-service los valida contra el JWKS de {@link TokensDePrueba}, como haría con auth-service.
- * El servicio de órdenes también es el real; el publicador de Kafka y la copia local de usuarios
- * son dobles de Mockito, así se puede ver qué comando se publicaría sin levantar Kafka ni base de datos.
+ * El servicio de órdenes también es el real; el publicador de Kafka y las copias locales de usuarios
+ * e instrumentos son dobles de Mockito, así se puede ver qué comando se publicaría sin levantar Kafka ni base de datos.
  */
 @WebMvcTest(OrdenController.class)
 @Import({ConfiguracionSeguridad.class, RespuestaNoAutorizado.class, ServicioOrdenes.class})
@@ -66,9 +71,33 @@ class OrdenControllerTest {
     @MockitoBean
     private RepositorioUsuarios usuarios;
 
+    @MockitoBean
+    private RepositorioInstrumentos instrumentos;
+
     @BeforeEach
-    void elUsuarioDelTokenEstaRegistrado() {
+    void elUsuarioDelTokenEstaRegistradoYAndxEstaActivo() {
         when(usuarios.existsById(UUID.fromString(USUARIO))).thenReturn(true);
+        when(instrumentos.findById("ANDX")).thenReturn(Optional.of(instrumento("ANDX", EstadoInstrumento.ACTIVO)));
+    }
+
+    @Test
+    void unaOrdenDeUnInstrumentoSuspendidoResponde422YNoSePublica() throws Exception {
+        when(instrumentos.findById("ANDX")).thenReturn(Optional.of(instrumento("ANDX", EstadoInstrumento.SUSPENDIDO)));
+
+        enviar(ORDEN, TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.title").value("Instrumento no disponible"))
+                .andExpect(jsonPath("$.detail").value("El instrumento ANDX está suspendido: no recibe órdenes nuevas."));
+        verifyNoInteractions(publicador);
+    }
+
+    @Test
+    void unaOrdenDeUnInstrumentoQueNoExisteResponde422YNoSePublica() throws Exception {
+        enviar(ORDEN.replace("ANDX", "NADA"), TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.title").value("Instrumento no disponible"))
+                .andExpect(jsonPath("$.detail").value("El instrumento NADA no existe."));
+        verifyNoInteractions(publicador);
     }
 
     @Test
@@ -192,6 +221,11 @@ class OrdenControllerTest {
             peticion.header(HttpHeaders.AUTHORIZATION, "Bearer " + token);
         }
         return mvc.perform(peticion);
+    }
+
+    private static Instrumento instrumento(String simbolo, EstadoInstrumento estado) {
+        return new Instrumento(new InstrumentoActualizado(simbolo, "Andex Energía", "Energía", 5_000, 10, 1_000_000,
+                estado, Instant.now()));
     }
 
     private void rechazado(ResultActions respuesta) throws Exception {

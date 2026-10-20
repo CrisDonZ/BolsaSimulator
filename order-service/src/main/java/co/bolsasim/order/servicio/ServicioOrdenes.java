@@ -2,8 +2,11 @@ package co.bolsasim.order.servicio;
 
 import co.bolsasim.eventos.ComandoOrden;
 import co.bolsasim.eventos.TipoOrden;
+import co.bolsasim.order.instrumento.Instrumento;
+import co.bolsasim.order.instrumento.RepositorioInstrumentos;
 import co.bolsasim.order.usuario.RepositorioUsuarios;
 import co.bolsasim.order.web.CrearOrdenRequest;
+import java.util.Locale;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 
@@ -16,10 +19,13 @@ public class ServicioOrdenes {
 
     private final PublicadorOrdenes publicador;
     private final RepositorioUsuarios usuarios;
+    private final RepositorioInstrumentos instrumentos;
 
-    public ServicioOrdenes(PublicadorOrdenes publicador, RepositorioUsuarios usuarios) {
+    public ServicioOrdenes(PublicadorOrdenes publicador, RepositorioUsuarios usuarios,
+                           RepositorioInstrumentos instrumentos) {
         this.publicador = publicador;
         this.usuarios = usuarios;
+        this.instrumentos = instrumentos;
     }
 
     /**
@@ -28,6 +34,7 @@ public class ServicioOrdenes {
     public ComandoOrden crear(String usuarioId, CrearOrdenRequest request) {
         validarPrecio(request);
         validarUsuario(usuarioId);
+        validarInstrumento(request.simbolo().toUpperCase(Locale.ROOT));
 
         ComandoOrden comando = ComandoOrden.nueva(
                 usuarioId,
@@ -55,6 +62,18 @@ public class ServicioOrdenes {
         }
         if (!usuarios.existsById(id)) {
             throw new UsuarioNoRegistradoException(usuarioId);
+        }
+    }
+
+    /**
+     * El instrumento debe estar en la copia local que llena instruments.events y estar activo. Uno
+     * suspendido rechaza órdenes nuevas; las cancelaciones, cuando existan (HU-08), sí pasarán (RF-29).
+     */
+    private void validarInstrumento(String simbolo) {
+        Instrumento instrumento = instrumentos.findById(simbolo)
+                .orElseThrow(() -> InstrumentoNoDisponibleException.noExiste(simbolo));
+        if (!instrumento.activo()) {
+            throw InstrumentoNoDisponibleException.suspendido(simbolo);
         }
     }
 

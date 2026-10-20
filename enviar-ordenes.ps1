@@ -1,6 +1,8 @@
 ﻿# Envía varias órdenes de prueba a través del gateway (puerto 8080).
 # Inicia sesión con tu correo y contraseña (los del registro en POST /api/usuarios) y envía cada orden
 # con el token de acceso. Las órdenes no llevan el id del usuario: order-service lo toma del token.
+# Los símbolos deben ser de instrumentos activos: los 10 iniciales (ANDX, CAFE, BGUA, TAYR, QUIM, FLOR, COLB,
+# ARRA, SALV, PACF) o los que cree el ADMIN. Uno que no existe o está suspendido se rechaza con el motivo.
 #
 #   $yo = @{ Correo = "cris@correo.com"; Contrasena = "secreta123" }
 #   .\enviar-ordenes.ps1 @yo                                             -> 3 compras de ANDX y 3 de CAFE a 5000
@@ -70,7 +72,8 @@ foreach ($simbolo in $Simbolos) {
                 -ContentType "application/json" -Body ($orden | ConvertTo-Json)
             Write-Host "$Lado $Cantidad $simbolo $detalle #$i -> $($respuesta.mensaje)"
         } catch {
-            # Por ejemplo, 401 si el token venció o 422 si el usuario no está registrado
+            # Por ejemplo, 401 si el token venció, o 422 si el usuario no está registrado o el instrumento
+            # no existe o está suspendido
             $motivo = Get-MotivoRechazo $_
             Write-Host "$Lado $Cantidad $simbolo $detalle #$i -> RECHAZADA: $motivo" -ForegroundColor Red
             exit 1

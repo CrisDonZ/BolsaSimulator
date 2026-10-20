@@ -32,7 +32,7 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 
 /**
  * Prueba del gateway completo (RNF-22): arranca en un puerto real y reenvía a {@link ServiciosFalsos},
- * que hacen de auth-service y order-service y publican la clave pública de prueba.
+ * que hacen de auth-service, order-service y market-data-service y publican la clave pública de prueba.
  * Los tokens se firman aquí con una clave RSA generada para la prueba, igual que lo hace auth-service.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -50,6 +50,7 @@ class GatewaySeguridadTest {
     static void serviciosFalsos(DynamicPropertyRegistry propiedades) {
         propiedades.add("bolsasim.servicios.auth", SERVICIOS::url);
         propiedades.add("bolsasim.servicios.ordenes", SERVICIOS::url);
+        propiedades.add("bolsasim.servicios.mercado", SERVICIOS::url);
     }
 
     @Value("${local.server.port}")
@@ -124,6 +125,22 @@ class GatewaySeguridadTest {
                 });
     }
 
+    @Test
+    void conUnTokenValidoLaGestionDeInstrumentosLlegaAMarketDataServiceConElMismoAuthorization() {
+        // El gateway no mira el rol: si es ADMIN lo decide market-data-service con el claim "rol"
+        String token = valido();
+
+        cliente.post().uri("/api/instrumentos")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON).bodyValue("{\"simbolo\":\"NUEVO\"}")
+                .exchange()
+                .expectStatus().isOk();
+
+        assertThat(SERVICIOS.recibidas("/api/instrumentos"))
+                .singleElement()
+                .satisfies(peticion -> assertThat(peticion.authorization()).isEqualTo("Bearer " + token));
+    }
+
     @ParameterizedTest
     @CsvSource({
             "POST, /api/usuarios",
@@ -157,7 +174,9 @@ class GatewaySeguridadTest {
     @CsvSource({
             "POST, /api/auth/logout",
             "GET,  /api/usuarios/123e4567-e89b-12d3-a456-426614174000",
-            "GET,  /api/ordenes"})
+            "GET,  /api/ordenes",
+            "GET,  /api/instrumentos",
+            "POST, /api/instrumentos/ANDX/suspender"})
     void lasDemasRutasDeLosServiciosExigenToken(String metodo, String ruta) {
         cliente.method(HttpMethod.valueOf(metodo)).uri(ruta)
                 .exchange()

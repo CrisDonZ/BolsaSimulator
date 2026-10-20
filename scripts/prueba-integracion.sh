@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Prueba de punta a punta, todo a través del gateway (puerto 8080): levanta Kafka y PostgreSQL, arranca
-# auth-service, order-service, matching-engine y el gateway, registra un usuario (y comprueba que llega a
-# users.registered y a order-service), inicia sesión, comprueba que el perfil de otro usuario responde 404,
-# que sin token se recibe 401 (también llamando directo a auth-service y order-service, sin el gateway)
-# y que una orden con usuarioId en el cuerpo recibe 400, envía con el
-# token una venta y una compra que se cruzan y comprueba que el motor registra la ejecución a nombre del
-# usuario del token. Por último renueva el token y comprueba que, después de cerrar sesión, el token de
-# refresco ya no sirve.
+# auth-service (con un ADMIN nuevo), order-service, market-data-service, matching-engine y el gateway,
+# registra un usuario (y comprueba que llega a users.registered y a order-service), inicia sesión,
+# comprueba que el perfil de otro usuario responde 404, que sin token se recibe 401 (también llamando
+# directo a auth-service, order-service y market-data-service, sin el gateway) y que una orden con
+# usuarioId en el cuerpo recibe 400. Después el ADMIN crea un instrumento nuevo con todo corriendo
+# (un inversionista recibe 403), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se
+# envían una venta y una compra de ese instrumento que se cruzan, y se comprueba que el motor registra la
+# ejecución a nombre del usuario del token. Por último renueva el token y comprueba que, después de
+# cerrar sesión, el token de refresco ya no sirve.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
-# (la prueba arranca los suyos en los puertos 8080, 8081 y 8082).
+# (la prueba arranca los suyos en los puertos 8080 a 8083).
 #
 #   bash scripts/prueba-integracion.sh
 set -euo pipefail
@@ -21,10 +23,11 @@ JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
 GATEWAY=http://localhost:8080
 ORDER_SERVICE=http://localhost:8081
 AUTH_SERVICE=http://localhost:8082
+MARKET_DATA_SERVICE=http://localhost:8083
 
-for puerto in 8080 8081 8082; do
+for puerto in 8080 8081 8082 8083; do
     if curl -s -o /dev/null "http://localhost:$puerto"; then
-        echo "El puerto $puerto está ocupado: detén el gateway, order-service y auth-service antes de correr la prueba."
+        echo "El puerto $puerto está ocupado: detén el gateway, order-service, auth-service y market-data-service antes de correr la prueba."
         exit 1
     fi
 done
@@ -72,26 +75,43 @@ campo() {
 echo "1. Levantando Kafka y PostgreSQL..."
 docker compose up -d --wait kafka postgres
 docker compose up --exit-code-from kafka-init kafka-init > /dev/null
+# init.sql solo corre la primera vez que arranca PostgreSQL: un contenedor de antes no tiene la base "mercado"
+if ! docker exec bolsasim-postgres psql -U bolsasim -d postgres -tAc \
+        "SELECT 1 FROM pg_database WHERE datname = 'mercado'" | grep -q 1; then
+    docker exec bolsasim-postgres createdb -U bolsasim mercado
+    echo "   Base \"mercado\" creada"
+fi
 
-echo "2. Arrancando auth-service, matching-engine, order-service y el gateway..."
-"$JAVA" -jar auth-service/target/auth-service-*[0-9T].jar > "$LOGS/auth-service.log" 2>&1 &
+echo "2. Arrancando auth-service, market-data-service, matching-engine, order-service y el gateway..."
+# Alias y correos distintos en cada corrida: PostgreSQL conserva los usuarios mientras el contenedor exista.
+# El ADMIN se crea al arrancar auth-service, con una contraseña aleatoria que no queda en ninguna parte.
+SUFIJO=$(date +%s)
+CORREO_ADMIN="admin_$SUFIJO@bolsasim.co"
+CLAVE_ADMIN="$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
+BOLSASIM_ADMIN_CORREO="$CORREO_ADMIN" BOLSASIM_ADMIN_CONTRASENA="$CLAVE_ADMIN" BOLSASIM_ADMIN_ALIAS="admin_$SUFIJO" \
+    "$JAVA" -jar auth-service/target/auth-service-*[0-9T].jar > "$LOGS/auth-service.log" 2>&1 &
 USUARIOS=$!
+"$JAVA" -jar market-data-service/target/market-data-service-*[0-9T].jar > "$LOGS/market-data-service.log" 2>&1 &
+MERCADO=$!
 "$JAVA" -jar matching-engine/target/matching-engine-*[0-9T].jar > "$LOGS/matching-engine.log" 2>&1 &
 MOTOR=$!
 "$JAVA" -jar order-service/target/order-service-*[0-9T].jar > "$LOGS/order-service.log" 2>&1 &
 ORDENES=$!
 "$JAVA" -jar gateway/target/gateway-*[0-9T].jar > "$LOGS/gateway.log" 2>&1 &
 ENTRADA=$!
-trap 'kill $USUARIOS $MOTOR $ORDENES $ENTRADA 2>/dev/null || true' EXIT
+trap 'kill $USUARIOS $MERCADO $MOTOR $ORDENES $ENTRADA 2>/dev/null || true' EXIT
 
 esperar "Started AuthServiceApplication" "$LOGS/auth-service.log" 60
+esperar "Administrador admin_$SUFIJO creado" "$LOGS/auth-service.log" 30
+esperar "Started MarketDataServiceApplication" "$LOGS/market-data-service.log" 60
 esperar "Started OrderServiceApplication" "$LOGS/order-service.log" 60
 esperar "Started GatewayApplication" "$LOGS/gateway.log" 60
 esperar "partitions assigned" "$LOGS/matching-engine.log" 60
+# market-data-service publica los 10 instrumentos iniciales al arrancar (si order-service ya los tenía de
+# una corrida anterior, el log dice "actualizado" en vez de "guardado")
+esperar "Instrumento ANDX .*copia local" "$LOGS/order-service.log" 60
 
 echo "3. Registrando un usuario a través del gateway..."
-# Alias y correo distintos en cada corrida: PostgreSQL conserva los usuarios mientras el contenedor exista
-SUFIJO=$(date +%s)
 CORREO="prueba_$SUFIJO@bolsasim.co"
 comprobar "Registro" "$(pedir POST /api/usuarios "{\"nombre\":\"Usuario de prueba\",\"alias\":\"prueba_$SUFIJO\",
     \"correo\":\"$CORREO\",\"contrasena\":\"secreta123\",\"aceptaPoliticaDatos\":true}")" 201
@@ -134,28 +154,62 @@ comprobar "Perfil directo a auth-service con un token alterado" \
 comprobar "Registro que no es JSON, directo a auth-service" "$(GATEWAY=$AUTH_SERVICE pedir POST /api/usuarios "{no es json")" 400
 echo "   Perfil de otro 404; directo a auth-service sin token o alterado 401; registro mal formado 400"
 
-echo "5. Comprobando las órdenes rechazadas..."
-ORDEN='{"simbolo":"TEST","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":10}'
+echo "5. El ADMIN crea un instrumento con todo corriendo..."
+comprobar "Login del ADMIN" "$(pedir POST /api/auth/login "{\"correo\":\"$CORREO_ADMIN\",\"contrasena\":\"$CLAVE_ADMIN\"}")" 200
+TOKEN_ADMIN=$(campo tokenAcceso)
+# Un símbolo de 5 letras al azar en cada corrida: la base conserva los instrumentos de corridas anteriores
+LETRAS=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+SIMBOLO=""
+for _ in 1 2 3 4 5; do SIMBOLO+=${LETRAS:RANDOM%26:1}; done
+INSTRUMENTO="{\"simbolo\":\"$SIMBOLO\",\"nombre\":\"Empresa de prueba\",\"sector\":\"Pruebas\",
+    \"precioInicial\":5000,\"tick\":10,\"accionesEmitidas\":100000}"
+comprobar "Crear un instrumento sin token" "$(pedir POST /api/instrumentos "$INSTRUMENTO")" 401
+comprobar "Crear un instrumento como inversionista" "$(pedir POST /api/instrumentos "$INSTRUMENTO" "$TOKEN")" 403
+comprobar "Crear un instrumento directo a market-data-service sin token" \
+    "$(GATEWAY=$MARKET_DATA_SERVICE pedir POST /api/instrumentos "$INSTRUMENTO")" 401
+comprobar "Crear un instrumento directo a market-data-service con un token alterado" \
+    "$(GATEWAY=$MARKET_DATA_SERVICE pedir POST /api/instrumentos "$INSTRUMENTO" "${TOKEN_ADMIN}x")" 401
+comprobar "Crear el instrumento $SIMBOLO como ADMIN" "$(pedir POST /api/instrumentos "$INSTRUMENTO" "$TOKEN_ADMIN")" 201
+comprobar "Crear $SIMBOLO otra vez" "$(pedir POST /api/instrumentos "$INSTRUMENTO" "$TOKEN_ADMIN")" 409
+comprobar "Editar el nombre de $SIMBOLO" \
+    "$(pedir PUT "/api/instrumentos/$SIMBOLO" '{"nombre":"Empresa de prueba S.A.","sector":"Pruebas"}' "$TOKEN_ADMIN")" 200
+comprobar "Cambiar el tick de $SIMBOLO" \
+    "$(pedir PUT "/api/instrumentos/$SIMBOLO" '{"nombre":"Empresa de prueba","sector":"Pruebas","tick":5}' "$TOKEN_ADMIN")" 400
+comprobar "Consultar el catálogo como inversionista" "$(pedir GET /api/instrumentos "" "$TOKEN")" 200
+grep -q "\"simbolo\":\"$SIMBOLO\"" "$LOGS/respuesta.json"
+grep -q '"simbolo":"ANDX"' "$LOGS/respuesta.json"
+esperar "Instrumento $SIMBOLO guardado en la copia local" "$LOGS/order-service.log" 30
+echo "   $SIMBOLO creado (201) y ya está en order-service; sin token 401, inversionista 403, repetido 409, tick 400"
+
+echo "6. Comprobando las órdenes rechazadas..."
+ORDEN="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":10}"
 comprobar "Orden sin token" "$(pedir POST /api/ordenes "$ORDEN")" 401
 comprobar "Orden con un token alterado" "$(pedir POST /api/ordenes "$ORDEN" "${TOKEN}x")" 401
 comprobar "Orden a nombre de otro usuario" "$(pedir POST /api/ordenes \
-    '{"usuarioId":"00000000-0000-0000-0000-000000000000","simbolo":"TEST","lado":"COMPRA","tipo":"LIMITE","precioLimite":5000,"cantidad":10}' \
-    "$TOKEN")" 400
+    "{\"usuarioId\":\"00000000-0000-0000-0000-000000000000\",${ORDEN#\{}" "$TOKEN")" 400
 # Saltándose el gateway: order-service valida el token por su cuenta
 comprobar "Orden directa a order-service sin token" "$(GATEWAY=$ORDER_SERVICE pedir POST /api/ordenes "$ORDEN")" 401
 comprobar "Orden directa a order-service con un token alterado" \
     "$(GATEWAY=$ORDER_SERVICE pedir POST /api/ordenes "$ORDEN" "${TOKEN}x")" 401
-echo "   Sin token 401, token alterado 401 y usuarioId en el cuerpo 400; directo a order-service también 401"
+comprobar "Orden de un instrumento que no existe" "$(pedir POST /api/ordenes "${ORDEN/$SIMBOLO/NADA}" "$TOKEN")" 422
+comprobar "Suspender $SIMBOLO como inversionista" "$(pedir POST "/api/instrumentos/$SIMBOLO/suspender" "" "$TOKEN")" 403
+comprobar "Suspender $SIMBOLO" "$(pedir POST "/api/instrumentos/$SIMBOLO/suspender" "" "$TOKEN_ADMIN")" 200
+esperar "Instrumento $SIMBOLO ahora está SUSPENDIDO" "$LOGS/order-service.log" 30
+comprobar "Orden de un instrumento suspendido" "$(pedir POST /api/ordenes "$ORDEN" "$TOKEN")" 422
+comprobar "Reactivar $SIMBOLO" "$(pedir POST "/api/instrumentos/$SIMBOLO/reactivar" "" "$TOKEN_ADMIN")" 200
+esperar "Instrumento $SIMBOLO ahora está ACTIVO" "$LOGS/order-service.log" 30
+echo "   Sin token 401, token alterado 401, usuarioId en el cuerpo 400, instrumento inexistente 422,"
+echo "   suspendido 422 hasta que se reactiva; directo a order-service también 401"
 
-echo "6. Enviando con el token una venta y una compra de TEST a 5000..."
+echo "7. Enviando con el token una venta y una compra de $SIMBOLO a 5000..."
 comprobar "Venta" "$(pedir POST /api/ordenes "${ORDEN/COMPRA/VENTA}" "$TOKEN")" 202
 comprobar "Compra" "$(pedir POST /api/ordenes "$ORDEN" "$TOKEN")" 202
 
 # El motor anota el usuario de cada orden: el id del registro solo puede venir del "sub" del token
-esperar "Ejecución: 10 acciones de TEST a 5000 COP .*($ID)" "$LOGS/matching-engine.log" 30
-echo "   El motor ejecutó las órdenes a nombre del usuario del token"
+esperar "Ejecución: 10 acciones de $SIMBOLO a 5000 COP .*($ID)" "$LOGS/matching-engine.log" 30
+echo "   El motor ejecutó las órdenes del instrumento nuevo a nombre del usuario del token"
 
-echo "7. Renovando el token y cerrando sesión..."
+echo "8. Renovando el token y cerrando sesión..."
 comprobar "Renovar el token" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200
 comprobar "Cerrar sesión sin token" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 comprobar "Cerrar sesión directo a auth-service sin token" \
@@ -164,4 +218,4 @@ comprobar "Cerrar sesión" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"
 comprobar "Renovar después de cerrar sesión" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 echo "   Refresco 200, logout sin token 401, logout 204 y refresco revocado 401"
 
-echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, sus órdenes viajaron por Kafka y el motor las ejecutó. Logs en $LOGS/"
+echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, las órdenes viajaron por Kafka y el motor las ejecutó. Logs en $LOGS/"

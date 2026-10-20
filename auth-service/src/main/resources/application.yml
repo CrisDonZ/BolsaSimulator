@@ -36,3 +36,10 @@ bolsasim:
     # Si está vacía, auth-service genera un par temporal al arrancar: sirve en desarrollo y en CI,
     # pero al reiniciar los tokens anteriores dejan de valer.
     clave-privada: ${AUTH_JWT_CLAVE_PRIVADA:}
+  admin:
+    # Primer administrador (rol ADMIN), que gestiona los instrumentos. Se crea al arrancar solo si el correo
+    # y la contraseña tienen valor y nadie usa ese correo; una cuenta que ya existe nunca se asciende.
+    # La contraseña nunca va en el repositorio (RNF-26).
+    correo: ${BOLSASIM_ADMIN_CORREO:}
+    contrasena: ${BOLSASIM_ADMIN_CONTRASENA:}
+    alias: ${BOLSASIM_ADMIN_ALIAS:admin}
