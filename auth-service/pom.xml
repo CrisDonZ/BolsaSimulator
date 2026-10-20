@@ -59,16 +59,11 @@
             <artifactId>spring-boot-starter-kafka</artifactId>
         </dependency>
 
-        <!-- Solo BCrypt para cifrar contraseñas, sin el filtro de seguridad de Spring Security:
-             validar el JWT en cada petición le toca al gateway (RNF-22) -->
+        <!-- Spring Security como resource server: valida el JWT de las rutas protegidas (RNF-22).
+             Trae también BCrypt para las contraseñas y Nimbus JOSE + JWT para firmar los tokens (HU-02) -->
         <dependency>
-            <groupId>org.springframework.security</groupId>
-            <artifactId>spring-security-crypto</artifactId>
-        </dependency>
-        <!-- Firma de los tokens JWT con RS256 (Nimbus JOSE + JWT, HU-02) -->
-        <dependency>
-            <groupId>org.springframework.security</groupId>
-            <artifactId>spring-security-oauth2-jose</artifactId>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
         </dependency>
 
         <!-- JUnit 5, AssertJ y Mockito -->
@@ -81,6 +76,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Hace que @WebMvcTest pase por los mismos filtros de seguridad que el servicio real -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-oauth2-resource-server-test</artifactId>
             <scope>test</scope>
         </dependency>
         <!-- @DataJpaTest para probar el repositorio contra la base -->

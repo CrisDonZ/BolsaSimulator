@@ -6,6 +6,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import co.bolsasim.auth.seguridad.ConfiguracionSeguridad;
+import co.bolsasim.auth.seguridad.RespuestaNoAutorizado;
 import co.bolsasim.auth.servicio.ConfiguracionJwt;
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.RSAKey;
@@ -18,11 +20,11 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
- * Prueba del JWKS: levanta solo la capa web y la configuración real de las claves
- * (sin AUTH_JWT_CLAVE_PRIVADA, así que usa un par temporal).
+ * Prueba del JWKS: levanta la capa web, la cadena de seguridad y la configuración real de las claves
+ * (sin AUTH_JWT_CLAVE_PRIVADA, así que usa un par temporal). Las peticiones van sin token: es público.
  */
 @WebMvcTest(JwksController.class)
-@Import(ConfiguracionJwt.class)
+@Import({ConfiguracionJwt.class, ConfiguracionSeguridad.class, RespuestaNoAutorizado.class})
 class JwksControllerTest {
 
     @Autowired

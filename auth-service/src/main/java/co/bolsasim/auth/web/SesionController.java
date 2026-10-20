@@ -3,6 +3,8 @@ package co.bolsasim.auth.web;
 import co.bolsasim.auth.servicio.ServicioSesiones;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -30,10 +32,13 @@ public class SesionController {
         return TokenAccesoResponse.de(servicioSesiones.renovar(request.tokenRefresco()));
     }
 
-    /** 204 siempre, aunque el token no exista: así la respuesta no dice qué tokens son válidos. */
+    /**
+     * 204 siempre, aunque el token no exista o sea de otro usuario: así la respuesta no dice qué tokens
+     * son válidos. Solo se revoca si el token de refresco es del usuario del token de acceso.
+     */
     @PostMapping("/logout")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void cerrar(@Valid @RequestBody TokenRefrescoRequest request) {
-        servicioSesiones.cerrar(request.tokenRefresco());
+    public void cerrar(@AuthenticationPrincipal Jwt token, @Valid @RequestBody TokenRefrescoRequest request) {
+        servicioSesiones.cerrar(token.getSubject(), request.tokenRefresco());
     }
 }

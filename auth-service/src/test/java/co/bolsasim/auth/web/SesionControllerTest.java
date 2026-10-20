@@ -6,28 +6,41 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import co.bolsasim.auth.TokensDePrueba;
+import co.bolsasim.auth.seguridad.ConfiguracionSeguridad;
+import co.bolsasim.auth.seguridad.RespuestaNoAutorizado;
+import co.bolsasim.auth.servicio.ConfiguracionJwt;
 import co.bolsasim.auth.servicio.CredencialesInvalidasException;
 import co.bolsasim.auth.servicio.ServicioSesiones;
 import co.bolsasim.auth.servicio.Sesion;
 import co.bolsasim.auth.servicio.TokenAcceso;
 import co.bolsasim.auth.servicio.TokenRefrescoInvalidoException;
+import com.nimbusds.jose.jwk.RSAKey;
 import java.time.Instant;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
- * Prueba del controlador: levanta solo la capa web (rutas, validaciones, JSON y manejo de errores).
- * El servicio es un doble de Mockito, así no hace falta base de datos.
+ * Prueba del controlador con la seguridad real: levanta la capa web (rutas, validaciones, JSON y manejo
+ * de errores), la cadena de seguridad y la clave de firma (un par temporal). El servicio es un doble de
+ * Mockito, así no hace falta base de datos.
  */
 @WebMvcTest(SesionController.class)
+@Import({ConfiguracionJwt.class, ConfiguracionSeguridad.class, RespuestaNoAutorizado.class})
 class SesionControllerTest {
+
+    private static final String ANA = UUID.randomUUID().toString();
 
     private static final String LOGIN = """
             {"correo":"ana@correo.com","contrasena":"secreta123"}
@@ -39,6 +52,9 @@ class SesionControllerTest {
 
     @Autowired
     private MockMvc mvc;
+
+    @Autowired
+    private RSAKey claveFirma;
 
     @MockitoBean
     private ServicioSesiones servicio;
@@ -96,9 +112,39 @@ class SesionControllerTest {
     }
 
     @Test
-    void cerrarSesionResponde204() throws Exception {
-        mvc.perform(post("/api/auth/logout").contentType(MediaType.APPLICATION_JSON).content(REFRESCO))
+    void renovarConUnTokenDeAccesoVencidoEnElHeaderIgualFunciona() throws Exception {
+        // Justo cuando el token de acceso venció es cuando más se necesita renovar: no debe recibir 401
+        when(servicio.renovar("token-de-ana")).thenReturn(ACCESO);
+
+        mvc.perform(post("/api/auth/refresh").contentType(MediaType.APPLICATION_JSON).content(REFRESCO)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + TokensDePrueba.vencido(claveFirma, ANA)))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void cerrarSesionConSuTokenResponde204YCierraLaSesionDeEseUsuario() throws Exception {
+        mvc.perform(post("/api/auth/logout").contentType(MediaType.APPLICATION_JSON).content(REFRESCO)
+                        .header(HttpHeaders.AUTHORIZATION,
+                                "Bearer " + TokensDePrueba.valido(claveFirma, ANA, "INVERSIONISTA")))
                 .andExpect(status().isNoContent());
-        verify(servicio).cerrar("token-de-ana");
+        // El servicio recibe quién cierra la sesión: solo revoca si el token de refresco es suyo
+        verify(servicio).cerrar(ANA, "token-de-ana");
+    }
+
+    @Test
+    void cerrarSesionSinTokenResponde401YNoCierraNada() throws Exception {
+        mvc.perform(post("/api/auth/logout").contentType(MediaType.APPLICATION_JSON).content(REFRESCO))
+                .andExpect(status().isUnauthorized())
+                .andExpect(header().string(HttpHeaders.WWW_AUTHENTICATE, "Bearer"));
+        verifyNoInteractions(servicio);
+    }
+
+    @Test
+    void cerrarSesionConUnTokenVencidoResponde401YNoCierraNada() throws Exception {
+        mvc.perform(post("/api/auth/logout").contentType(MediaType.APPLICATION_JSON).content(REFRESCO)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + TokensDePrueba.vencido(claveFirma, ANA)))
+                .andExpect(status().isUnauthorized())
+                .andExpect(header().string(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"invalid_token\""));
+        verifyNoInteractions(servicio);
     }
 }

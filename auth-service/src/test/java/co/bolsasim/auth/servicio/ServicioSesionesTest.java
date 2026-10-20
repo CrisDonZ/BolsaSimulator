@@ -36,7 +36,7 @@ class ServicioSesionesTest {
 
     private final RepositorioUsuarios usuarios = mock(RepositorioUsuarios.class);
     private final RepositorioTokensRefresco tokens = mock(RepositorioTokensRefresco.class);
-    private final PasswordEncoder cifrador = new ConfiguracionSeguridad().cifradorContrasenas();
+    private final PasswordEncoder cifrador = new ConfiguracionContrasenas().cifradorContrasenas();
     private final EmisorTokens emisor = mock(EmisorTokens.class);
     private final ServicioSesiones servicio = new ServicioSesiones(usuarios, tokens, cifrador, emisor, PROPIEDADES);
 
@@ -128,7 +128,7 @@ class ServicioSesionesTest {
     void refrescoDespuesDeCerrarSesionSeRechaza() {
         guardarToken("token-de-ana", Instant.now().plus(Duration.ofDays(7)));
 
-        servicio.cerrar("token-de-ana");
+        servicio.cerrar(ana.getId().toString(), "token-de-ana");
 
         assertThatThrownBy(() -> servicio.renovar("token-de-ana"))
                 .isInstanceOf(TokenRefrescoInvalidoException.class);
@@ -162,14 +162,24 @@ class ServicioSesionesTest {
     void cerrarSesionRevocaElTokenDeRefresco() {
         TokenRefresco token = guardarToken("token-de-ana", Instant.now().plus(Duration.ofDays(7)));
 
-        servicio.cerrar("token-de-ana");
+        servicio.cerrar(ana.getId().toString(), "token-de-ana");
 
         assertThat(token.isRevocado()).isTrue();
     }
 
     @Test
+    void nadiePuedeCerrarLaSesionDeOtroUsuario() {
+        TokenRefresco token = guardarToken("token-de-ana", Instant.now().plus(Duration.ofDays(7)));
+
+        servicio.cerrar(UUID.randomUUID().toString(), "token-de-ana");
+
+        assertThat(token.isRevocado()).isFalse();
+        assertThat(servicio.renovar("token-de-ana")).isEqualTo(TOKEN_ACCESO);
+    }
+
+    @Test
     void cerrarSesionConUnTokenDesconocidoNoFalla() {
-        servicio.cerrar("token-inventado");
+        servicio.cerrar(ana.getId().toString(), "token-inventado");
     }
 
     /** Lo que la base devolvería al buscar el token por su hash. */

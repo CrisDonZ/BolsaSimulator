@@ -77,10 +77,17 @@ public class ServicioSesiones {
         return emisor.emitir(token.getUsuario());
     }
 
-    /** Si el token no existe o ya estaba revocado no pasa nada: el resultado es el mismo, sesión cerrada. */
+    /**
+     * Si el token no existe o ya estaba revocado no pasa nada: el resultado es el mismo, sesión cerrada.
+     * Si es de otro usuario tampoco pasa nada: nadie puede cerrar la sesión de otro (RNF-23).
+     *
+     * @param usuarioId el "sub" del token de acceso de quien cierra la sesión
+     */
     @Transactional
-    public void cerrar(String tokenRefresco) {
-        tokens.findByTokenHash(hash(tokenRefresco)).ifPresent(TokenRefresco::revocar);
+    public void cerrar(String usuarioId, String tokenRefresco) {
+        tokens.findByTokenHash(hash(tokenRefresco))
+                .filter(token -> token.getUsuario().getId().toString().equals(usuarioId))
+                .ifPresent(TokenRefresco::revocar);
     }
 
     /** 256 bits aleatorios: imposible de adivinar, por eso basta un SHA-256 para guardarlo (no hace falta BCrypt). */

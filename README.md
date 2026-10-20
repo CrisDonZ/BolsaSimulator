@@ -21,7 +21,7 @@ Postman / curl ──▶ gateway                            (puerto 8082) ──
 | `eventos/` | Java puro, sin Spring: los eventos `ComandoOrden` y `UsuarioRegistrado`, los enums y los nombres de tópicos. Lo comparten todos los servicios. |
 | `order-service/` | API REST `POST /api/ordenes`, validaciones y el publicador de Kafka. Vuelve a validar el JWT con la clave pública de auth-service y toma el usuario de la orden del token (`sub`), no del cuerpo. Escucha `users.registered` y guarda los ids en su base (tabla `usuario_registrado`) para aceptar solo órdenes de usuarios registrados. |
 | `matching-engine/` | El consumidor de Kafka y el libro de órdenes (`libro/`, Java puro con pruebas JUnit). |
-| `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. |
+| `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. Vuelve a validar el JWT en las rutas protegidas: cada usuario solo consulta su propio perfil y solo cierra sus propias sesiones. |
 | `gateway/` | Spring Cloud Gateway (WebFlux) en el puerto 8080: enruta a auth-service y order-service y exige un JWT válido, verificado con la clave pública de auth-service, salvo para registrarse, iniciar sesión, renovar el token y leer la clave. Reenvía el token original sin cambiarlo. |
 | `docker-compose.yml` | Kafka (modo KRaft), creación de tópicos, Kafka UI y PostgreSQL. |
 | `postgres/init.sql` | Crea una base por servicio la primera vez que arranca PostgreSQL. |
@@ -54,7 +54,7 @@ Espera unos 30 segundos y revisa con `docker compose ps`: `bolsasim-kafka` y `bo
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 113 pruebas pasadas: 23 de order-service, 14 del libro de órdenes, 60 de auth-service y 16 del gateway. Las de integración de auth-service y order-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 128 pruebas pasadas: 23 de order-service, 14 del libro de órdenes, 75 de auth-service y 16 del gateway. Las de integración de auth-service y order-service usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -115,9 +115,10 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/auth/logout -Heade
 | `POST /api/usuarios` | No | `201` con el usuario registrado. |
 | `POST /api/auth/login` | No | `200` con `tokenAcceso` (JWT de 15 min), `tokenRefresco` (7 días) y cuándo vence cada uno. Correo o contraseña equivocados: `401` "Correo o contraseña incorrectos", sin decir cuál falló. |
 | `POST /api/auth/refresh` | No | `200` con un `tokenAcceso` nuevo. Si la sesión se cerró o venció: `401`. |
-| `POST /api/auth/logout` | Sí | `204`. El token de refresco queda revocado. Si el token de acceso ya venció, renuévalo primero. |
+| `POST /api/auth/logout` | Sí | `204`. El token de refresco queda revocado si es tuyo; si es de otro usuario también responde `204`, pero no se revoca. Si el token de acceso ya venció, renuévalo primero. |
+| `GET /api/usuarios/{id}` | Sí | `200` con tu perfil. El de otro usuario responde `404`, igual que un id que no existe, para no revelar quién está registrado (RNF-23). Un `ADMIN` puede consultar cualquiera. |
 | `GET /.well-known/jwks.json` (o `/oauth2/jwks`) | No | La clave pública para verificar la firma de los tokens, con `Cache-Control: max-age=300, public`. |
-| `GET /api/usuarios/{id}`, `/api/ordenes` y cualquier otra ruta | Sí | Sin token, con el token vencido, con la firma alterada o de otro emisor: `401` del gateway, y la petición no llega al servicio. order-service vuelve a validar el token: llamándolo directo al 8081 también responde `401`. |
+| Todas las rutas que piden token | Sí | Sin token, con el token vencido, con la firma alterada o de otro emisor: `401` del gateway, y la petición no llega al servicio. auth-service y order-service vuelven a validar el token: llamándolos directo al 8082 o al 8081 también responden `401`. |
 
 El token de acceso lleva solo el id del usuario (`sub`) y su `rol`: nada de correo ni nombre, porque cualquiera que lo tenga puede leerlo. En la base solo se guarda el hash del token de refresco.
 
@@ -175,6 +176,7 @@ El número de partición puede ser otro; lo importante es lo que muestran los ex
 | auth-service u order-service: `Connection to localhost:5433 refused` | PostgreSQL no está arriba | `docker compose up -d postgres` y espera a *healthy* |
 | order-service: `database "ordenes" does not exist` | Tu contenedor de PostgreSQL es de antes de que existiera esa base (`init.sql` solo corre la primera vez) | `docker exec bolsasim-postgres createdb -U bolsasim ordenes` |
 | `422` con "no está registrado" | order-service todavía no recibió el evento de `users.registered` de ese usuario | Espera unos segundos; si sigue, revisa que Kafka esté arriba y el log de order-service |
+| `404` al consultar un usuario que sí existe | Es el perfil de otro usuario: solo puedes consultar el tuyo | Usa el `id` del usuario con el que iniciaste sesión (el `sub` del token) |
 | `400` con "usuarioId ya no se envía" | La orden trae el `usuarioId` en el cuerpo, como antes del token | Quítalo: el usuario sale del token |
 | `401` con "Falta el token de acceso" | La petición no trae el header `Authorization: Bearer ...` | Inicia sesión (`POST /api/auth/login`) y envía el `tokenAcceso` |
 | `401` con "no es válido o ya venció" | Pasaron los 15 minutos, o reiniciaste auth-service (en desarrollo genera claves nuevas al arrancar) | Renueva con `POST /api/auth/refresh` o inicia sesión de nuevo |
@@ -216,6 +218,5 @@ GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba d
 ## Siguientes pasos
 
 - **Outbox:** si Kafka está caído justo después de registrar a alguien, hoy el evento se pierde. La tabla OUTBOX del modelo entidad-relación guarda el evento junto con el usuario y lo publica después.
-- **auth-service valida el JWT:** hoy `GET /api/usuarios/{id}` y `/api/auth/logout` solo están protegidos por el gateway; llamando directo al 8082 no piden token. Además, cada usuario debería poder consultar solo su propio perfil (RNF-23).
 - **Límite de órdenes (RNF-24):** 20 órdenes por segundo por usuario en el gateway; el exceso recibe 429.
 - **Ejecuciones en Kafka:** publicarlas en `trades.executed` para que el portafolio de cada usuario se entere de sus compras y ventas.
