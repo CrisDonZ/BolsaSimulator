@@ -33,6 +33,22 @@ public class RepositorioReservas {
                 .update();
     }
 
+    /** Una reserva de acciones ACTIVA: monto_reservado son las acciones que la venta bloquea. */
+    public void crearDeAcciones(UUID cuentaId, UUID ordenId, String simbolo, long acciones, Instant ahora) {
+        jdbc.sql("""
+                        INSERT INTO reserva (id, cuenta_id, orden_id, tipo, simbolo, precio_limite, monto_reservado,
+                                             monto_consumido, monto_liberado, estado, creada_en, actualizada_en)
+                        VALUES (:id, :cuenta, :orden, 'ACCIONES', :simbolo, NULL, :acciones, 0, 0, 'ACTIVA', :ahora,
+                                :ahora)""")
+                .param("id", UUID.randomUUID())
+                .param("cuenta", cuentaId)
+                .param("orden", ordenId)
+                .param("simbolo", simbolo)
+                .param("acciones", acciones)
+                .param("ahora", ahora.atOffset(ZoneOffset.UTC))
+                .update();
+    }
+
     public boolean existeParaLaOrden(UUID ordenId) {
         return jdbc.sql("SELECT EXISTS (SELECT 1 FROM reserva WHERE orden_id = :orden)")
                 .param("orden", ordenId)
@@ -46,7 +62,8 @@ public class RepositorioReservas {
      */
     public Optional<Reserva> bloquearPorOrden(UUID ordenId) {
         return jdbc.sql("""
-                        SELECT r.id, r.cuenta_id, c.usuario_id, r.orden_id, r.precio_limite, r.monto_reservado,
+                        SELECT r.id, r.cuenta_id, c.usuario_id, r.orden_id, r.tipo, r.simbolo, r.precio_limite,
+                               r.monto_reservado,
                                r.monto_consumido, r.monto_liberado, r.estado
                         FROM reserva r JOIN cuenta c ON c.id = r.cuenta_id
                         WHERE r.orden_id = :orden

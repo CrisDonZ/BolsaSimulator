@@ -178,18 +178,6 @@ class ReservasYLiquidacionIntegracionTest {
     }
 
     @Test
-    void unaVentaSeAceptaSinReservarNadaHastaHu06() {
-        SolicitudReserva venta = new SolicitudReserva(UUID.randomUUID(), UUID.randomUUID(), ana.toString(), "ANDX",
-                Lado.VENTA, TipoOrden.LIMITE, 5_000L, 100, 5_000, Instant.now());
-
-        reservas.procesar(venta);
-
-        assertThat(respuestaDe(venta).resultado()).isEqualTo("ACEPTADA");
-        assertThat(cuenta().saldoDisponible()).isEqualTo(SALDO_INICIAL);
-        assertThat(reservasDeLaCuenta()).isZero();
-    }
-
-    @Test
     void siLaCuentaTodaviaNoExisteSeAbreConElSaldoInicialAntesDeReservar() {
         UUID beto = UUID.randomUUID();
         SolicitudReserva compra = new SolicitudReserva(UUID.randomUUID(), UUID.randomUUID(), beto.toString(), "ANDX",
@@ -331,14 +319,14 @@ class ReservasYLiquidacionIntegracionTest {
     }
 
     /**
-     * Regla 4 y RNF-08: el reservado es la suma de las reservas ACTIVAS, y el total de la cuenta es el saldo inicial
-     * más las compras (negativas). Las reservas y liberaciones solo mueven dinero de un lado al otro.
+     * Regla 4 y RNF-08: el reservado es la suma de las reservas ACTIVAS de dinero, y el total de la cuenta es el saldo
+     * inicial más las compras (negativas). Las reservas y liberaciones solo mueven dinero de un lado al otro.
      */
     private void cuadra() {
         Cuenta cuenta = cuenta();
         long activas = jdbc.sql("""
                         SELECT COALESCE(SUM(monto_reservado - monto_consumido - monto_liberado), 0) FROM reserva
-                        WHERE cuenta_id = :cuenta AND estado = 'ACTIVA'""")
+                        WHERE cuenta_id = :cuenta AND estado = 'ACTIVA' AND tipo = 'DINERO'""")
                 .param("cuenta", cuenta.id()).query(Long.class).single();
         long compras = movimientos("COMPRA").stream().mapToLong(Long::longValue).sum();
         long reservasYLiberaciones = movimientos("RESERVA").stream().mapToLong(Long::longValue).sum()

@@ -33,7 +33,7 @@ public class CuentaController {
      * Los movimientos de dinero, del más reciente al más viejo (RF-09, RF-10). Para la página siguiente, envía en
      * despues el valor "siguiente" de esta respuesta, con los mismos filtros.
      *
-     * @param tipo  SALDO_INICIAL, RESERVA, LIBERACION, COMPRA, VENTA o REINICIO; sin él, todos
+     * @param tipo  SALDO_INICIAL, RESERVA, LIBERACION, COMPRA, VENTA, EMISION o REINICIO; sin él, todos
      * @param desde día inicial AAAA-MM-DD (hora de Colombia), incluido
      * @param hasta día final AAAA-MM-DD, incluido completo
      */

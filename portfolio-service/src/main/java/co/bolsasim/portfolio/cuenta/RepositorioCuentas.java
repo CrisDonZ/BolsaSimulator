@@ -90,4 +90,50 @@ public class RepositorioCuentas {
                 .param("ahora", ahora.atOffset(ZoneOffset.UTC))
                 .update() == 1;
     }
+
+    /** Cobra una venta: el dinero entra al disponible del vendedor. */
+    public void acreditarVenta(UUID cuentaId, long monto, Instant ahora) {
+        jdbc.sql("""
+                        UPDATE cuenta
+                        SET saldo_disponible = saldo_disponible + :monto, version = version + 1, actualizado_en = :ahora
+                        WHERE id = :id""")
+                .param("id", cuentaId)
+                .param("monto", monto)
+                .param("ahora", ahora.atOffset(ZoneOffset.UTC))
+                .update();
+    }
+
+    /**
+     * Guarda el rol de users.registered si la cuenta todavía no lo tiene: se abrió antes, con la primera consulta o
+     * la primera orden, y su evento llega después.
+     */
+    public void completarRol(UUID usuarioId, String rol) {
+        jdbc.sql("UPDATE cuenta SET rol = :rol WHERE usuario_id = :usuario AND rol IS NULL")
+                .param("usuario", usuarioId)
+                .param("rol", rol)
+                .update();
+    }
+
+    /**
+     * Marca la cuenta como la del creador de mercado, salvo que ya haya otra: las acciones emitidas tienen un solo
+     * dueño (índice único parcial de V3).
+     *
+     * @return false si otra cuenta ya es el creador de mercado; nada cambia
+     */
+    public boolean marcarCreadorDeMercado(UUID usuarioId) {
+        return jdbc.sql("""
+                        UPDATE cuenta SET creador_mercado = true
+                        WHERE usuario_id = :usuario
+                          AND NOT EXISTS (SELECT 1 FROM cuenta otra WHERE otra.creador_mercado
+                                                                     AND otra.usuario_id <> :usuario)""")
+                .param("usuario", usuarioId)
+                .update() == 1;
+    }
+
+    /** El id de la cuenta del creador de mercado, si ya llegó su users.registered. */
+    public Optional<UUID> creadorDeMercado() {
+        return jdbc.sql("SELECT id FROM cuenta WHERE creador_mercado")
+                .query(UUID.class)
+                .optional();
+    }
 }

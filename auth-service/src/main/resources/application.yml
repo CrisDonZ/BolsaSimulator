@@ -43,3 +43,10 @@ bolsasim:
     correo: ${BOLSASIM_ADMIN_CORREO:}
     contrasena: ${BOLSASIM_ADMIN_CONTRASENA:}
     alias: ${BOLSASIM_ADMIN_ALIAS:admin}
+  creador-mercado:
+    # Bot creador de mercado (rol BOT), que recibe en portfolio-service las acciones emitidas de cada instrumento
+    # (RF-59). Como el ADMIN: se crea al arrancar solo si el correo y la contraseña tienen valor, y una cuenta que
+    # ya existe y no es BOT nunca se asciende. La contraseña nunca va en el repositorio (RNF-26).
+    correo: ${BOLSASIM_CREADOR_MERCADO_CORREO:}
+    contrasena: ${BOLSASIM_CREADOR_MERCADO_CONTRASENA:}
+    alias: ${BOLSASIM_CREADOR_MERCADO_ALIAS:creador_mercado}

@@ -9,7 +9,7 @@ import java.time.Instant;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
-/** Prueba unitaria de cuánto reserva cada compra (RF-17): Java puro. */
+/** Prueba unitaria de cuánto reserva cada compra y del motivo de una venta rechazada (RF-17, RF-18): Java puro. */
 class CalculoReservaTest {
 
     @Test
@@ -37,6 +37,14 @@ class CalculoReservaTest {
         assertThat(ServicioReservas.montoAReservar(compra(TipoOrden.LIMITE, Long.MAX_VALUE / 2, 3, 5_000))).isEmpty();
         assertThat(ServicioReservas.montoAReservar(compra(TipoOrden.MERCADO, null, Integer.MAX_VALUE,
                 Long.MAX_VALUE / 100))).isEmpty();
+    }
+
+    @Test
+    void elMotivoDeUnaVentaSinAccionesDiceCuantasTieneYCuantasVende() {
+        assertThat(ServicioReservas.motivoSinAcciones(400, "ANDX", 500))
+                .isEqualTo("Acciones insuficientes: tienes 400 de ANDX disponibles y la orden vende 500.");
+        assertThat(ServicioReservas.motivoSinAcciones(0, "CAFE", 1_500))
+                .isEqualTo("Acciones insuficientes: tienes 0 de CAFE disponibles y la orden vende 1.500.");
     }
 
     @Test

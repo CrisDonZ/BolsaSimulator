@@ -100,7 +100,7 @@ class ServicioCuentasTest {
     void siHayMasMovimientosQueElTamanoLaPaginaTraeElCursorDelUltimo() {
         when(cuentas.buscarPorUsuario(ANA)).thenReturn(Optional.of(deAna));
         List<Movimiento> tres = IntStream.range(0, 3)
-                .mapToObj(i -> new Movimiento(UUID.randomUUID(), CUENTA, TipoMovimiento.COMPRA, -1_000, "ANDX", 1,
+                .mapToObj(i -> new Movimiento(UUID.randomUUID(), CUENTA, TipoMovimiento.COMPRA, -1_000, "ANDX", 1L,
                         UUID.randomUUID(), Instant.now().minusSeconds(i)))
                 .toList();
         when(movimientos.buscar(CUENTA, null, null, null, null, 3)).thenReturn(tres);
@@ -116,7 +116,7 @@ class ServicioCuentasTest {
         String valido = "INVERSIONISTA";
         assertThatThrownBy(() -> servicio.movimientos(ANA, valido, "REGALO", null, null, 20, null))
                 .isInstanceOf(ConsultaInvalidaException.class)
-                .hasMessage("tipo debe ser uno de: SALDO_INICIAL, RESERVA, LIBERACION, COMPRA, VENTA, REINICIO.");
+                .hasMessage("tipo debe ser uno de: SALDO_INICIAL, RESERVA, LIBERACION, COMPRA, VENTA, EMISION, REINICIO.");
         assertThatThrownBy(() -> servicio.movimientos(ANA, valido, null, "20-10-2026", null, 20, null))
                 .isInstanceOf(ConsultaInvalidaException.class)
                 .hasMessageStartingWith("desde debe ser una fecha AAAA-MM-DD");

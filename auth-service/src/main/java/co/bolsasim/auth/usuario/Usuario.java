@@ -72,6 +72,11 @@ public class Usuario {
         return new Usuario(nombre, alias, correo, passwordHash, Rol.ADMIN, ahora);
     }
 
+    /** El bot creador de mercado, que auth-service crea al arrancar (ver CreadorDeMercado). */
+    public static Usuario nuevoBot(String nombre, String alias, String correo, String passwordHash, Instant ahora) {
+        return new Usuario(nombre, alias, correo, passwordHash, Rol.BOT, ahora);
+    }
+
     public UUID getId() {
         return id;
     }

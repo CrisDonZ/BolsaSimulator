@@ -74,6 +74,17 @@ public class ServicioCuentas {
     }
 
     /**
+     * Como {@link #abrir(UUID)}, y además guarda el rol del usuario (INVERSIONISTA o BOT) si la cuenta todavía no lo
+     * tiene: una cuenta abierta con la primera orden no lo sabía.
+     */
+    @Transactional
+    public Cuenta abrir(UUID usuarioId, String rol) {
+        Cuenta cuenta = abrir(usuarioId);
+        cuentas.completarRol(usuarioId, rol);
+        return cuenta;
+    }
+
+    /**
      * La cuenta del usuario del token; si todavía no tiene (se registró antes de portfolio-service, o su evento
      * aún no llega), la abre. Un ADMIN no tiene cuenta: no opera.
      *
@@ -84,7 +95,7 @@ public class ServicioCuentas {
         if ("ADMIN".equals(rol)) {
             throw new SinCuentaException();
         }
-        return cuentas.buscarPorUsuario(usuarioId).orElseGet(() -> abrir(usuarioId));
+        return cuentas.buscarPorUsuario(usuarioId).orElseGet(() -> abrir(usuarioId, rol));
     }
 
     /**
