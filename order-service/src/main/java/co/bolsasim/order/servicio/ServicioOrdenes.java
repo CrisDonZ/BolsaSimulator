@@ -1,6 +1,7 @@
 package co.bolsasim.order.servicio;
 
 import co.bolsasim.eventos.ComandoOrden;
+import co.bolsasim.eventos.EstadoOrden;
 import co.bolsasim.eventos.SolicitudReserva;
 import co.bolsasim.eventos.TipoOrden;
 import co.bolsasim.eventos.Topicos;
@@ -164,6 +165,45 @@ public class ServicioOrdenes {
                     + "- o _; por ejemplo un UUID.");
         }
         return clave;
+    }
+
+    /**
+     * Pide al motor que retire la orden del libro (HU-08, RF-19): deja el comando CANCELAR en el outbox, en la misma
+     * transacción que marca la cancelación pedida. El estado no cambia aquí: la orden queda CANCELADA cuando el motor
+     * lo confirma en orders.events, y portfolio-service libera lo que quede reservado (RF-31). Una orden PARCIAL
+     * conserva lo ejecutado. Si se ejecuta completa antes de que el motor procese el CANCELAR, queda EJECUTADA:
+     * cancelar es una solicitud, no una garantía.
+     *
+     * <p>Solo una orden ABIERTA o PARCIAL: esos estados los pone el motor, así que su NUEVA ya salió y el CANCELAR
+     * nunca puede adelantarla. Una PENDIENTE todavía no llega al libro: cancelarla no retiraría nada y la orden
+     * entraría después. No se revisa el instrumento: uno suspendido permite cancelar (RF-29).
+     *
+     * <p>Si la cancelación ya se pidió, devuelve la orden sin publicar otro comando.
+     *
+     * @throws OrdenNoEncontradaException si no existe o es de otro usuario (RNF-23)
+     * @throws OrdenNoCancelableException si está PENDIENTE o ya terminó
+     */
+    @Transactional
+    public Orden cancelar(String usuarioId, UUID ordenId) {
+        UUID usuario = comoUuid(usuarioId).orElseThrow(() -> new OrdenNoEncontradaException(ordenId));
+        Instant ahora = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        boolean marcada = ordenes.solicitarCancelacion(ordenId, usuario, ahora) == 1;
+        Orden orden = ordenes.findByIdAndUsuarioId(ordenId, usuario)
+                .orElseThrow(() -> new OrdenNoEncontradaException(ordenId));
+        if (marcada) {
+            ComandoOrden comando = ComandoOrden.cancelar(orden.getId(), usuario.toString(), orden.getSimbolo(),
+                    orden.getLado(), orden.getTipo(), orden.getPrecioLimite(), orden.getCantidad());
+            // La misma clave que su NUEVA (el símbolo): la misma partición, después de ella
+            outbox.guardar(Topicos.ORDERS_COMMANDS, comando.simbolo(), comando);
+            return orden;
+        }
+        if (orden.getCancelacionSolicitadaEn() != null) {
+            return orden;
+        }
+        if (orden.getEstado() == EstadoOrden.PENDIENTE) {
+            throw OrdenNoCancelableException.pendiente();
+        }
+        throw OrdenNoCancelableException.terminada(orden.getEstado());
     }
 
     /** La orden de otro usuario responde lo mismo que una que no existe (RNF-23). */

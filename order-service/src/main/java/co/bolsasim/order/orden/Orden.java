@@ -68,6 +68,10 @@ public class Orden implements Persistable<UUID> {
     @Column(name = "actualizada_en")
     private Instant actualizadaEn;
 
+    /** Cuándo pidió el usuario cancelarla (HU-08); null si nunca lo pidió. Lo pone RepositorioOrdenes. */
+    @Column(name = "cancelacion_solicitada_en")
+    private Instant cancelacionSolicitadaEn;
+
     @Version
     private int version;
 
@@ -245,5 +249,9 @@ public class Orden implements Persistable<UUID> {
 
     public Instant getActualizadaEn() {
         return actualizadaEn;
+    }
+
+    public Instant getCancelacionSolicitadaEn() {
+        return cancelacionSolicitadaEn;
     }
 }

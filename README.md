@@ -83,7 +83,7 @@ Si tu contenedor de PostgreSQL es de antes de market-data-service o de portfolio
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 377 pruebas pasadas: 120 de order-service, 36 de matching-engine, 89 de auth-service, 42 de market-data-service, 69 de portfolio-service y 21 del gateway. Las de integración usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 392 pruebas pasadas: 135 de order-service, 36 de matching-engine, 89 de auth-service, 42 de market-data-service, 69 de portfolio-service y 21 del gateway. Las de integración usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -169,6 +169,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/auth/logout -Heade
 | Las rutas de `ADMIN` con otro rol | Sí | `403` "Solo un administrador puede gestionar instrumentos.". No `404` como en los perfiles: el catálogo lo ve cualquiera, así que no hay nada que ocultar. |
 | `POST /api/ordenes` | Sí | `202` con el `ordenId` y el header `Location: /api/ordenes/{id}`. La orden queda guardada PENDIENTE aunque Kafka esté caído. Pide el header `Idempotency-Key` (`400` sin él); ver *Órdenes duplicadas* abajo. |
 | `GET /api/ordenes/{id}` | Sí | `200` con la orden: estado, cantidad ejecutada, precio promedio y fechas. La de otro usuario responde `404`, igual que una que no existe (RNF-23). |
+| `POST /api/ordenes/{id}/cancelacion` | Sí | `202` con la orden, todavía `ABIERTA` o `PARCIAL` y con `cancelacionSolicitadaEn`: queda `CANCELADA` cuando el motor lo confirma. Pedirla otra vez responde `202` sin enviar otro comando. `409` si está `PENDIENTE` o ya terminó; `404` si no existe o es de otro usuario. Ver *Cancelar una orden* abajo. |
 | `GET /api/ordenes?estado=…&tamano=…&despues=…` | Sí | `200` con `ordenes` (de la más reciente a la más vieja) y `siguiente`. Ver *Tus órdenes* abajo. |
 | `GET /api/cuenta` | Sí | `200` con tu saldo disponible, reservado y total, y el saldo inicial. Si tu cuenta todavía no existía, esta consulta la abre. Un `ADMIN` recibe `404`: no tiene cuenta de inversión. Ver *Tu cuenta* abajo. |
 | `GET /api/cuenta/movimientos?tipo=…&desde=…&hasta=…&tamano=…&despues=…` | Sí | `200` con `movimientos` (del más reciente al más viejo) y `siguiente`. |
@@ -316,6 +317,30 @@ El **precio promedio** es Σ(precio × cantidad) / Σ(cantidad) de todas sus eje
 (Invoke-RestMethod -Uri "http://localhost:8080/api/ordenes?tamano=5" -Headers $auth).ordenes | Format-Table simbolo, lado, cantidad, cantidadEjecutada, precioPromedio, estado
 ```
 
+## Cancelar una orden
+
+Una orden `ABIERTA` o `PARCIAL` se puede cancelar (HU-08, RF-19). Es un `POST` y no un `DELETE`: la orden no se borra, se pide su cancelación y el motor la hace después.
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/api/ordenes/$ordenId/cancelacion" -Headers $auth
+```
+
+1. order-service marca `cancelacionSolicitadaEn` y deja el comando `CANCELAR` en el outbox, en la misma transacción. Responde `202` con la orden, que sigue `ABIERTA` o `PARCIAL`.
+2. El comando va por `orders.commands` con el símbolo como clave, igual que su `NUEVA`: la misma partición y después de ella. El outbox sale en el orden de su columna `secuencia` y el productor es idempotente, así un reintento no los reordena.
+3. El motor retira lo pendiente del libro y publica `CANCELADA` con "Cancelada por el usuario.". order-service actualiza la orden y portfolio-service libera lo que quedaba reservado: el dinero de una compra o las acciones de una venta (RF-31).
+
+| Llega | Responde |
+| --- | --- |
+| Una orden `ABIERTA` o `PARCIAL` | `202` y sale un `CANCELAR`. |
+| La misma cancelación otra vez, o dos a la vez | `202` las dos; sale un solo `CANCELAR` (un `UPDATE` condicionado decide cuál lo envía). |
+| Una orden `PENDIENTE` | `409` "La orden todavía se está procesando; intenta cancelarla en unos segundos.": todavía no llega al libro, y un `CANCELAR` que se adelantara a su `NUEVA` no retiraría nada. |
+| Una orden `EJECUTADA`, `CANCELADA` o `RECHAZADA` | `409` "La orden ya terminó (ESTADO): no se puede cancelar." |
+| Una orden que no existe o es de otro usuario | `404`, como la consulta. |
+
+- **Una orden ejecutada en parte** queda `CANCELADA` con lo que alcanzó a ejecutar y su precio promedio: solo se retira y se devuelve lo pendiente.
+- **Cancelar es una solicitud, no una garantía.** Si la orden se ejecuta completa antes de que el motor lea el `CANCELAR`, queda `EJECUTADA` (con `cancelacionSolicitadaEn`): el motor ignora el `CANCELAR` de una orden que ya no está en el libro.
+- **Un instrumento suspendido** no impide cancelar (RF-29): sus órdenes siguen en el libro y se pueden retirar.
+
 - **Filtro:** `estado=ABIERTAS` trae las `ABIERTA` y `PARCIAL` (HU-09); también sirve un estado exacto (`PENDIENTE`, `EJECUTADA`, `CANCELADA`...). Sin `estado`, todas.
 - **Páginas:** `tamano` va de 1 a 100 (20 si no lo envías). Si hay más órdenes, la respuesta trae `siguiente`: envíalo tal cual en `despues` para pedir la página siguiente, con el mismo filtro. Cuando `siguiente` es `null`, no hay más.
 - **Por qué un cursor y no números de página:** con `?pagina=500`, PostgreSQL tendría que leer y descartar 10.000 órdenes, y contar el total recorrería todas en cada petición; un bot que envía una orden cada 200 ms acumula unas 430.000 al día. Con el cursor, cada página salta directo en un índice a donde quedó la anterior: la primera y la número 10.000 cuestan lo mismo, y una orden nueva no corre las páginas siguientes. Por eso tampoco hay total.
@@ -391,21 +416,22 @@ Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
 
 ## Prueba de integración
 
-Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cinco servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria, y el creador de mercado, con un correo y una contraseña fijos que solo sirven para la prueba), registra un usuario, comprueba que su evento llegue a `users.registered`, a order-service y a portfolio-service, inicia sesión, consulta su saldo de 10.000.000 y su movimiento `SALDO_INICIAL` (el ADMIN recibe 404), comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; un precio fuera del tick o de la banda de ±10 % recibe 422, y el creador de mercado recibe sus 100.000 acciones emitidas (movimiento `EMISION`). Una venta del usuario, que no tiene acciones, queda `RECHAZADA` con "Acciones insuficientes...". El creador vende y el usuario compra: cada orden pide su reserva a portfolio-service, y se revisa que sus comandos salgan del outbox y que el motor registre la ejecución a nombre del usuario del token. La compra se reenvía con la misma `Idempotency-Key` y se comprueba que a `orders.commands` llega un solo comando. Las dos órdenes quedan `EJECUTADA` con su precio promedio (lo publica el motor en `orders.events`), hay una sola operación de la compra en `trades.executed`, se recorren página por página con el cursor, y otro usuario recibe 404. Después comprueba los criterios de HU-05: con una venta de 100 a 4.900 del creador de mercado en el libro, una compra de 100 a 5.000 se ejecuta a 4.900, el saldo queda en 9.460.000 sin nada reservado y aparecen los movimientos `RESERVA`, `COMPRA` y `LIBERACION` (10.000); una compra sin contraparte queda `ABIERTA` con 450.000 reservados, y una sin saldo suficiente queda `RECHAZADA` con "Saldo insuficiente: tienes 9.010.000 COP disponibles...". Por la API se comprueba que el creador cobró los 540.000 que pagó el comprador (HU-06), con sus movimientos `VENTA`. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8084) y ten Docker abierto:
+Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cinco servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria, y el creador de mercado, con un correo y una contraseña fijos que solo sirven para la prueba), registra un usuario, comprueba que su evento llegue a `users.registered`, a order-service y a portfolio-service, inicia sesión, consulta su saldo de 10.000.000 y su movimiento `SALDO_INICIAL` (el ADMIN recibe 404), comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; un precio fuera del tick o de la banda de ±10 % recibe 422, y el creador de mercado recibe sus 100.000 acciones emitidas (movimiento `EMISION`). Una venta del usuario, que no tiene acciones, queda `RECHAZADA` con "Acciones insuficientes...". El creador vende y el usuario compra: cada orden pide su reserva a portfolio-service, y se revisa que sus comandos salgan del outbox y que el motor registre la ejecución a nombre del usuario del token. La compra se reenvía con la misma `Idempotency-Key` y se comprueba que a `orders.commands` llega un solo comando. Las dos órdenes quedan `EJECUTADA` con su precio promedio (lo publica el motor en `orders.events`), hay una sola operación de la compra en `trades.executed`, se recorren página por página con el cursor, y otro usuario recibe 404. Después comprueba los criterios de HU-05: con una venta de 100 a 4.900 del creador de mercado en el libro, una compra de 100 a 5.000 se ejecuta a 4.900, el saldo queda en 9.460.000 sin nada reservado y aparecen los movimientos `RESERVA`, `COMPRA` y `LIBERACION` (10.000); una compra sin contraparte queda `ABIERTA` con 450.000 reservados, y una sin saldo suficiente queda `RECHAZADA` con "Saldo insuficiente: tienes 9.010.000 COP disponibles...". Por la API se comprueba que el creador cobró los 540.000 que pagó el comprador (HU-06), con sus movimientos `VENTA`. Luego cancela dos órdenes (HU-08): una compra que no cruzó queda `CANCELADA` y el disponible vuelve a lo de antes, y una compra de 100 ejecutada en 30 queda `CANCELADA` con sus 30 y devuelve solo lo de las 70 pendientes; repetir la cancelación responde 202, cancelar una ejecutada 409 y la de otro 404. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8084) y ten Docker abierto:
 
 ```bash
 ./mvnw -B verify
 bash scripts/prueba-integracion.sh
 ```
 
-Debe terminar con `OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, el creador de mercado recibió sus acciones, las órdenes quedaron guardadas, reservaron su saldo o sus acciones, viajaron por Kafka, el motor las ejecutó y portfolio-service liquidó al comprador y al vendedor`. Los logs quedan en `target/integracion/`.
+Debe terminar con `OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, el creador de mercado recibió sus acciones, las órdenes quedaron guardadas, reservaron su saldo o sus acciones, viajaron por Kafka, el motor las ejecutó, portfolio-service liquidó al comprador y al vendedor, y las cancelaciones devolvieron lo pendiente`. Los logs quedan en `target/integracion/`.
 
 GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba de integración en cada push y pull request a `main`.
 
 ## Siguientes pasos
 
 - **Instantáneas del libro (RNF-13):** los libros viven en memoria y se pierden al reiniciar el motor. Publicarlos en `orderbook.snapshots` (compactado) y reconstruirlos al arrancar desde la última instantánea y los comandos posteriores.
-- **Cancelar una orden (HU-08):** el motor ya cancela y publica `CANCELADA`; falta el endpoint en order-service que envía el comando CANCELAR.
+- **Órdenes que vencen al cierre (RF-21):** las órdenes límite deben cancelarse solas al cerrar el mercado; llega con la apertura y el cierre (HU-23), y puede usar el mismo comando `CANCELAR`.
+- **Orden del outbox de portfolio-service:** order-service ya ordena su outbox por una secuencia; el de portfolio-service todavía ordena por `(creado_en, id)`.
 - **Ver mi portafolio (HU-11, RF-32):** la tabla POSICION ya se mantiene con cada compra, venta y emisión; falta el endpoint con el valor actual y la ganancia o pérdida.
 - **Bots de mercado (HU-24):** el creador de mercado ya existe y tiene las acciones emitidas; falta bot-service, que pone sus órdenes de compra y venta según una estrategia.
 - **Autocruce (RF-27):** hoy una orden puede cruzarse con otra del mismo usuario; el motor debe cancelar la entrante.

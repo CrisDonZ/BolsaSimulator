@@ -63,6 +63,16 @@ public class OrdenController {
     }
 
     /**
+     * Pide cancelar la orden (HU-08). Es POST y no DELETE: la orden no se borra, se pide su cancelación y el motor la
+     * hace después. Responde 202 con la orden todavía ABIERTA o PARCIAL, con cancelacionSolicitadaEn; queda CANCELADA
+     * cuando llega el evento del motor. Pedirla otra vez responde lo mismo, sin enviar otro comando.
+     */
+    @PostMapping("/{id}/cancelacion")
+    public ResponseEntity<OrdenResponse> cancelar(@AuthenticationPrincipal Jwt token, @PathVariable UUID id) {
+        return ResponseEntity.accepted().body(OrdenResponse.de(servicioOrdenes.cancelar(token.getSubject(), id)));
+    }
+
+    /**
      * Tus órdenes, de la más reciente a la más vieja (HU-09). Para la página siguiente, envía en despues el
      * valor "siguiente" de esta respuesta.
      *

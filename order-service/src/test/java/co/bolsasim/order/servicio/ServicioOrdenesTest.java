@@ -11,6 +11,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import co.bolsasim.eventos.AccionComando;
 import co.bolsasim.eventos.ComandoOrden;
 import co.bolsasim.eventos.EstadoInstrumento;
 import co.bolsasim.eventos.InstrumentoActualizado;
@@ -29,6 +30,7 @@ import co.bolsasim.order.orden.RepositorioOrdenes;
 import co.bolsasim.order.outbox.Outbox;
 import co.bolsasim.order.usuario.RepositorioUsuarios;
 import co.bolsasim.order.web.CrearOrdenRequest;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -40,6 +42,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.PlatformTransactionManager;
 
 /**
@@ -317,6 +320,100 @@ class ServicioOrdenesTest {
     }
 
     @Test
+    void unaOrdenAbiertaSeCancelaConUnComandoCancelarEnElOutboxYSuEstadoNoCambiaTodavia() {
+        Orden abierta = enEstado(EstadoOrden.ABIERTA, 0);
+        when(ordenes.solicitarCancelacion(eq(abierta.getId()), eq(REGISTRADO), any())).thenReturn(1);
+        when(ordenes.findByIdAndUsuarioId(abierta.getId(), REGISTRADO)).thenReturn(Optional.of(abierta));
+
+        Orden resultado = servicio.cancelar(REGISTRADO.toString(), abierta.getId());
+
+        // Queda ABIERTA hasta que el motor confirme con CANCELADA
+        assertThat(resultado.getEstado()).isEqualTo(EstadoOrden.ABIERTA);
+        ComandoOrden comando = cancelarEnElOutbox();
+        assertThat(comando.accion()).isEqualTo(AccionComando.CANCELAR);
+        assertThat(comando.ordenId()).isEqualTo(abierta.getId());
+        assertThat(comando.usuarioId()).isEqualTo(REGISTRADO.toString());
+        assertThat(comando.simbolo()).isEqualTo("ANDX");
+    }
+
+    @Test
+    void unaOrdenParcialSeCancelaIgualYConservaLoEjecutado() {
+        Orden parcial = enEstado(EstadoOrden.PARCIAL, 40);
+        when(ordenes.solicitarCancelacion(eq(parcial.getId()), eq(REGISTRADO), any())).thenReturn(1);
+        when(ordenes.findByIdAndUsuarioId(parcial.getId(), REGISTRADO)).thenReturn(Optional.of(parcial));
+
+        Orden resultado = servicio.cancelar(REGISTRADO.toString(), parcial.getId());
+
+        assertThat(resultado.getCantidadEjecutada()).isEqualTo(40);
+        assertThat(cancelarEnElOutbox().ordenId()).isEqualTo(parcial.getId());
+    }
+
+    @Test
+    void unaOrdenPendienteNoSeCancelaPorqueTodaviaNoLlegaAlLibro() {
+        Orden pendiente = enEstado(EstadoOrden.PENDIENTE, 0);
+        when(ordenes.findByIdAndUsuarioId(pendiente.getId(), REGISTRADO)).thenReturn(Optional.of(pendiente));
+
+        assertThatThrownBy(() -> servicio.cancelar(REGISTRADO.toString(), pendiente.getId()))
+                .isInstanceOf(OrdenNoCancelableException.class)
+                .hasMessage("La orden todavía se está procesando; intenta cancelarla en unos segundos.");
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void unaOrdenTerminadaNoSeCancela() {
+        for (EstadoOrden terminado : List.of(EstadoOrden.EJECUTADA, EstadoOrden.CANCELADA, EstadoOrden.RECHAZADA)) {
+            Orden orden = enEstado(terminado, terminado == EstadoOrden.EJECUTADA ? 100 : 0);
+            when(ordenes.findByIdAndUsuarioId(orden.getId(), REGISTRADO)).thenReturn(Optional.of(orden));
+
+            assertThatThrownBy(() -> servicio.cancelar(REGISTRADO.toString(), orden.getId()))
+                    .as("orden %s", terminado)
+                    .isInstanceOf(OrdenNoCancelableException.class)
+                    .hasMessage("La orden ya terminó (" + terminado + "): no se puede cancelar.");
+        }
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void cancelarLaOrdenDeOtroResponde404ComoUnaQueNoExiste() {
+        UUID deOtro = UUID.randomUUID();
+
+        assertThatThrownBy(() -> servicio.cancelar(REGISTRADO.toString(), deOtro))
+                .isInstanceOf(OrdenNoEncontradaException.class)
+                .hasMessage("No hay ninguna orden tuya con el id " + deOtro + ".");
+        // El UPDATE y la búsqueda filtran por id y dueño a la vez: la de otro no se toca ni se distingue
+        verify(ordenes).solicitarCancelacion(eq(deOtro), eq(REGISTRADO), any());
+        verify(ordenes).findByIdAndUsuarioId(deOtro, REGISTRADO);
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void unaCancelacionRepetidaDevuelveLaOrdenSinPublicarOtroComando() {
+        Orden yaPedida = enEstado(EstadoOrden.ABIERTA, 0);
+        ReflectionTestUtils.setField(yaPedida, "cancelacionSolicitadaEn", Instant.now());
+        // El UPDATE no la marca otra vez: ya tiene cancelacion_solicitada_en
+        when(ordenes.findByIdAndUsuarioId(yaPedida.getId(), REGISTRADO)).thenReturn(Optional.of(yaPedida));
+
+        Orden resultado = servicio.cancelar(REGISTRADO.toString(), yaPedida.getId());
+
+        assertThat(resultado).isSameAs(yaPedida);
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void unInstrumentoSuspendidoNoImpideCancelar() {
+        when(instrumentos.findById("ANDX")).thenReturn(Optional.of(instrumento("ANDX", EstadoInstrumento.SUSPENDIDO)));
+        Orden abierta = enEstado(EstadoOrden.ABIERTA, 0);
+        when(ordenes.solicitarCancelacion(eq(abierta.getId()), eq(REGISTRADO), any())).thenReturn(1);
+        when(ordenes.findByIdAndUsuarioId(abierta.getId(), REGISTRADO)).thenReturn(Optional.of(abierta));
+
+        servicio.cancelar(REGISTRADO.toString(), abierta.getId());
+
+        // RF-29: el instrumento ni se consulta
+        verify(instrumentos, never()).findById(any());
+        assertThat(cancelarEnElOutbox().ordenId()).isEqualTo(abierta.getId());
+    }
+
+    @Test
     void buscarLaOrdenDeOtroResponde404ComoUnaQueNoExiste() {
         UUID deOtro = UUID.randomUUID();
 
@@ -392,6 +489,28 @@ class ServicioOrdenesTest {
         SolicitudReserva solicitud = (SolicitudReserva) evento.getValue();
         assertThat(clave.getValue()).isEqualTo(solicitud.usuarioId());
         return solicitud;
+    }
+
+    /** El comando CANCELAR que quedó en el outbox para orders.commands, con el símbolo como clave, como su NUEVA. */
+    private ComandoOrden cancelarEnElOutbox() {
+        ArgumentCaptor<Object> evento = ArgumentCaptor.forClass(Object.class);
+        verify(outbox).guardar(eq(Topicos.ORDERS_COMMANDS), eq("ANDX"), evento.capture());
+        return (ComandoOrden) evento.getValue();
+    }
+
+    /** Una compra de 100 ANDX a 5.000 que el motor (o la reserva) llevó a ese estado. */
+    private static Orden enEstado(EstadoOrden estado, int ejecutada) {
+        Orden orden = ordenCon("clave-" + UUID.randomUUID(), "ANDX", 100);
+        Instant ahora = Instant.now();
+        switch (estado) {
+            case PENDIENTE -> {
+            }
+            case RECHAZADA -> orden.rechazar("Saldo insuficiente", ahora);
+            case CANCELADA -> orden.aplicar(EstadoOrden.CANCELADA, 100, ejecutada, null, "Cancelada", ahora);
+            default -> orden.aplicar(estado, 100, ejecutada, ejecutada == 0 ? null : BigDecimal.valueOf(5_000), null,
+                    ahora);
+        }
+        return orden;
     }
 
     private void nadaGuardado() {

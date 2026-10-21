@@ -37,6 +37,9 @@ spring:
         "[delivery.timeout.ms]": 10000
         "[request.timeout.ms]": 5000
         "[max.block.ms]": 5000
+        # Idempotente: un reintento no duplica ni reordena los mensajes dentro de la partición. Es el valor por
+        # defecto con acks=all, pero Kafka lo apaga sin avisar si otra opción choca con él; así queda explícito
+        "[enable.idempotence]": true
     consumer:
       # Lee users.registered para abrir la cuenta de cada usuario, orders.requested para reservar el saldo de cada
       # orden y orders.events para liquidar lo que ejecuta el motor

@@ -5,6 +5,7 @@ import co.bolsasim.order.servicio.ClaveIdempotenciaReusadaException;
 import co.bolsasim.order.servicio.ConsultaInvalidaException;
 import co.bolsasim.order.servicio.InstrumentoNoDisponibleException;
 import co.bolsasim.order.servicio.OrdenInvalidaException;
+import co.bolsasim.order.servicio.OrdenNoCancelableException;
 import co.bolsasim.order.servicio.OrdenNoEncontradaException;
 import co.bolsasim.order.servicio.PrecioInvalidoException;
 import co.bolsasim.order.servicio.UsuarioNoRegistradoException;
@@ -84,6 +85,14 @@ public class ManejadorErrores {
     public ProblemDetail ordenNoEncontrada(OrdenNoEncontradaException e) {
         ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, e.getMessage());
         problema.setTitle("Orden no encontrada");
+        return problema;
+    }
+
+    /** 409: la orden existe, pero su estado no permite cancelarla ahora. */
+    @ExceptionHandler(OrdenNoCancelableException.class)
+    public ProblemDetail ordenNoCancelable(OrdenNoCancelableException e) {
+        ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, e.getMessage());
+        problema.setTitle("Orden no cancelable");
         return problema;
     }
 

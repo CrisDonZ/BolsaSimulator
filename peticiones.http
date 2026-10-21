@@ -428,3 +428,10 @@ Content-Type: application/json
   "precioLimite": 5000,
   "cantidad": 10000
 }
+
+### 42. Cancelar una orden (HU-08): la de la 6, si sigue ABIERTA o PARCIAL (pega su ordenId en @ordenId) -> 202
+###     con la orden y "cancelacionSolicitadaEn". Con la 29 la ves CANCELADA, motivo "Cancelada por el usuario.", y
+###     con la 35 tu saldo reservado vuelve. Envíala otra vez: 202 de nuevo, sin otro comando. Una orden PENDIENTE
+###     o que ya terminó responde 409; la de otro usuario, 404.
+POST {{gateway}}/api/ordenes/{{ordenId}}/cancelacion
+Authorization: Bearer {{token}}

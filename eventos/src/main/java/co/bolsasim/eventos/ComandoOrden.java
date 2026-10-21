@@ -61,4 +61,16 @@ public record ComandoOrden(
         return new ComandoOrden(comandoId, AccionComando.NUEVA, ordenId, usuarioId, simbolo, lado, tipo, precioLimite,
                 cantidad, Instant.now());
     }
+
+    /**
+     * El comando CANCELAR de una orden que está en el libro (RF-19). Lleva los mismos datos que su NUEVA, aunque el
+     * motor solo usa el ordenId y el símbolo; el símbolo es la clave del mensaje, así va a la misma partición que la
+     * NUEVA. El comandoId sale del ordenId: si se publicara dos veces, el motor lo reconocería como repetido.
+     */
+    public static ComandoOrden cancelar(UUID ordenId, String usuarioId, String simbolo, Lado lado, TipoOrden tipo,
+                                        Long precioLimite, int cantidad) {
+        UUID comandoId = UUID.nameUUIDFromBytes((ordenId + "/CANCELAR").getBytes(StandardCharsets.UTF_8));
+        return new ComandoOrden(comandoId, AccionComando.CANCELAR, ordenId, usuarioId, simbolo, lado, tipo,
+                precioLimite, cantidad, Instant.now());
+    }
 }

@@ -15,8 +15,10 @@
 # contraparte queda ABIERTA con su dinero reservado, y una sin saldo suficiente queda RECHAZADA con el motivo.
 # Las ventas son del creador de mercado, que auth-service crea al arrancar y que recibe en portfolio-service las
 # acciones emitidas del instrumento nuevo (RF-59); una venta de quien no tiene acciones queda RECHAZADA. Al final
-# se comprueba por la API que el creador cobró lo que pagó el comprador (HU-06). Por último renueva el token y
-# comprueba que, después de cerrar sesión, el token de refresco ya no sirve.
+# se comprueba por la API que el creador cobró lo que pagó el comprador (HU-06). Después se cancelan dos órdenes
+# (HU-08): una compra que no cruzó devuelve todo su dinero, y una ejecutada en parte queda CANCELADA con lo
+# ejecutado y devuelve solo lo pendiente. Por último renueva el token y comprueba que, después de cerrar sesión, el
+# token de refresco ya no sirve.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
 # (la prueba arranca los suyos en los puertos 8080 a 8084).
@@ -415,7 +417,47 @@ grep -q "\"tipo\":\"VENTA\",\"monto\":50000,\"simbolo\":\"$SIMBOLO\",\"cantidad\
 echo "   El creador cobró 540.000 (de $CREADOR_ANTES a $CREADOR_ESPERADO) y el comprador pagó lo mismo: VENTA 50.000 y"
 echo "   490.000 en sus movimientos"
 
-echo "9. Renovando el token y cerrando sesión..."
+echo "9. Cancelando órdenes (HU-08)..."
+# La compra de 100 a 4500 del paso 8 sigue en el libro con 450.000 reservados
+comprobar "Cancelar la compra abierta" "$(pedir POST "/api/ordenes/$ABIERTA/cancelacion" "" "$TOKEN")" 202
+grep -q '"estado":"ABIERTA"' "$LOGS/respuesta.json"
+grep -q '"cancelacionSolicitadaEn":"' "$LOGS/respuesta.json"
+esperar_respuesta "Compra abierta cancelada" "/api/ordenes/$ABIERTA" "$TOKEN" \
+    '"cantidadEjecutada":0,.*"estado":"CANCELADA","motivo":"Cancelada por el usuario."'
+# El disponible vuelve a ser el de antes de la orden: 9.460.000
+esperar_respuesta "Cuenta después de cancelar" /api/cuenta "$TOKEN" \
+    '"saldoDisponible":9460000,"saldoReservado":0,"saldoTotal":9460000'
+comprobar "Cancelar otra vez la misma orden" "$(pedir POST "/api/ordenes/$ABIERTA/cancelacion" "" "$TOKEN")" 202
+comprobar "Cancelar una orden ejecutada" "$(pedir POST "/api/ordenes/$COMPRA_HU05/cancelacion" "" "$TOKEN")" 409
+grep -q 'La orden ya terminó (EJECUTADA): no se puede cancelar.' "$LOGS/respuesta.json"
+comprobar "Cancelar la orden de otro usuario" "$(pedir POST "/api/ordenes/$ABIERTA/cancelacion" "" "$TOKEN_OTRO")" 404
+comprobar "Cancelar sin token" "$(pedir POST "/api/ordenes/$ABIERTA/cancelacion")" 401
+echo "   Compra sin contraparte cancelada: CANCELADA, 0 ejecutadas y el disponible otra vez en 9.460.000; repetir 202,"
+echo "   una ejecutada 409, la de otro 404, sin token 401"
+
+# Una compra de 100 a 4900 que solo encuentra 30 a la venta: queda PARCIAL
+VENTA_30="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"VENTA\",\"tipo\":\"LIMITE\",\"precioLimite\":4900,\"cantidad\":30}"
+comprobar "Venta de 30 a 4900 del creador" "$(pedir POST /api/ordenes "$VENTA_30" "$TOKEN_CREADOR")" 202
+VENTA_30_ID=$(campo ordenId)
+esperar_respuesta "Venta de 30 en el libro" "/api/ordenes/$VENTA_30_ID" "$TOKEN_CREADOR" '"estado":"ABIERTA"'
+COMPRA_100="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":4900,\"cantidad\":100}"
+comprobar "Compra de 100 a 4900" "$(pedir POST /api/ordenes "$COMPRA_100" "$TOKEN")" 202
+PARCIAL=$(campo ordenId)
+esperar_respuesta "Compra ejecutada en parte" "/api/ordenes/$PARCIAL" "$TOKEN" \
+    '"cantidadEjecutada":30,.*"estado":"PARCIAL"'
+# Reservó 490.000 y pagó 147.000: quedan 343.000 reservados para las 70 pendientes
+esperar_respuesta "Cuenta con la compra parcial" /api/cuenta "$TOKEN" \
+    '"saldoDisponible":8970000,"saldoReservado":343000,"saldoTotal":9313000'
+comprobar "Cancelar la compra parcial" "$(pedir POST "/api/ordenes/$PARCIAL/cancelacion" "" "$TOKEN")" 202
+esperar_respuesta "Compra parcial cancelada" "/api/ordenes/$PARCIAL" "$TOKEN" \
+    '"cantidadEjecutada":30,"precioPromedio":4900.*"estado":"CANCELADA","motivo":"Cancelada por el usuario."'
+# Solo vuelve lo de las 70 que no se compraron; las 30 compradas se pagaron
+esperar_respuesta "Cuenta después de cancelar la parcial" /api/cuenta "$TOKEN" \
+    '"saldoDisponible":9313000,"saldoReservado":0,"saldoTotal":9313000'
+echo "   Compra de 100 ejecutada en 30 y cancelada: CANCELADA con las 30 a 4900; se devolvieron los 343.000 de las"
+echo "   70 pendientes y el saldo queda en 9.313.000"
+
+echo "10. Renovando el token y cerrando sesión..."
 comprobar "Renovar el token" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200
 comprobar "Cerrar sesión sin token" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 comprobar "Cerrar sesión directo a auth-service sin token" \
@@ -424,4 +466,4 @@ comprobar "Cerrar sesión" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"
 comprobar "Renovar después de cerrar sesión" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 echo "   Refresco 200, logout sin token 401, logout 204 y refresco revocado 401"
 
-echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, el creador de mercado recibió sus acciones, las órdenes quedaron guardadas, reservaron su saldo o sus acciones, viajaron por Kafka, el motor las ejecutó y portfolio-service liquidó al comprador y al vendedor. Logs en $LOGS/"
+echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, el creador de mercado recibió sus acciones, las órdenes quedaron guardadas, reservaron su saldo o sus acciones, viajaron por Kafka, el motor las ejecutó, portfolio-service liquidó al comprador y al vendedor, y las cancelaciones devolvieron lo pendiente. Logs en $LOGS/"
