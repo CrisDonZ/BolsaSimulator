@@ -10,6 +10,7 @@ import co.bolsasim.portfolio.posicion.RepositorioPosiciones;
 import co.bolsasim.portfolio.reserva.EstadoReserva;
 import co.bolsasim.portfolio.reserva.RepositorioReservas;
 import co.bolsasim.portfolio.reserva.Reserva;
+import co.bolsasim.portfolio.reserva.TipoReserva;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Optional;
@@ -19,19 +20,22 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Liquida las compras con lo que publica el motor en orders.events (RF-30, RF-31): cada ejecución se paga con la
- * reserva de su orden y le suma las acciones al comprador; lo que no se usó vuelve al disponible.
+ * Liquida cada operación con lo que publica el motor en orders.events (RF-30, RF-31), una orden a la vez: cada
+ * operación llega como dos eventos, el del comprador y el del vendedor. Es contabilidad de doble partida (RNF-08):
+ * lo que paga el comprador lo cobra el vendedor, y las acciones que salen de uno entran al otro.
  *
  * <ul>
- *   <li>Compra LIMITE: en cada ejecución se libera lo que se pagó por debajo del límite, (límite − precio) ×
- *       acciones. Así lo reservado siempre es justo lo que falta por comprar al precio límite.</li>
- *   <li>Cuando la orden termina (EJECUTADA o CANCELADA), se libera lo que quede: el sobrante de una compra a
- *       mercado o lo que no se ejecutó de una orden cancelada.</li>
+ *   <li>Compra (reserva de DINERO): cada ejecución se paga con la reserva y le suma las acciones al comprador. Con
+ *       una compra LIMITE se libera en cada ejecución lo que se pagó por debajo del límite, (límite − precio) ×
+ *       acciones, así lo reservado siempre es justo lo que falta por comprar al precio límite.</li>
+ *   <li>Venta (reserva de ACCIONES): cada ejecución entrega las acciones reservadas y cobra precio × acciones.</li>
+ *   <li>Cuando la orden termina (EJECUTADA o CANCELADA), se libera lo que quede: el dinero que sobró de una compra o
+ *       las acciones que no se vendieron.</li>
  * </ul>
  *
  * <p>Se liquida con orders.events y no con trades.executed porque ahí llegan, en el orden del motor y por la misma
- * partición, las ejecuciones de una orden y su cancelación: la cancelación nunca libera dinero que una ejecución
- * anterior todavía no pagó.
+ * partición, las ejecuciones de una orden y su cancelación: la cancelación nunca libera lo que una ejecución
+ * anterior todavía no usó.
  *
  * <p>Cada evento en una transacción: la marca, el saldo, la posición, la reserva y los movimientos se guardan
  * juntos o no se guarda nada. Un evento repetido no hace nada (RNF-09).
@@ -57,7 +61,7 @@ public class ServicioLiquidacion {
     }
 
     /**
-     * @return false si el evento ya se había aplicado o su orden no tiene reserva de dinero
+     * @return false si el evento ya se había aplicado o su orden no tiene reserva
      * @throws EventoImposibleException si el evento no tiene sentido para la reserva; no se aplica nada
      */
     @Transactional
@@ -68,8 +72,8 @@ public class ServicioLiquidacion {
         }
         Optional<Reserva> encontrada = reservas.bloquearPorOrden(evento.ordenId());
         if (encontrada.isEmpty()) {
-            // Una venta (su liquidación llega con HU-06) o una compra de antes de las reservas
-            log.info("Orden {} sin reserva de dinero: no hay nada que liquidar", evento.ordenId());
+            // Una orden de antes de las reservas: no hay nada que pagar con ella
+            log.info("Orden {} sin reserva: no hay nada que liquidar", evento.ordenId());
             return false;
         }
         Reserva reserva = encontrada.get();
@@ -86,6 +90,20 @@ public class ServicioLiquidacion {
         }
 
         Instant ahora = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        if (reserva.tipo() == TipoReserva.ACCIONES) {
+            liquidarVenta(reserva, evento, ahora);
+        } else {
+            liquidarCompra(reserva, evento, ahora);
+        }
+        return true;
+    }
+
+    /**
+     * La compra paga cada ejecución con la reserva, suma las acciones a la posición y libera lo pagado por debajo
+     * del límite; al terminar, libera lo que quede.
+     */
+    private void liquidarCompra(Reserva reserva, EventoOrden evento, Instant ahora) {
+        EjecucionOrden ejecucion = evento.ejecucion();
         long pendiente = reserva.pendiente();
         long delReservado = 0;
         long delDisponible = 0;
@@ -110,9 +128,9 @@ public class ServicioLiquidacion {
                     + " COP, la reserva solo cubría " + delReservado + " y el disponible no alcanza para el resto");
         }
         if (ejecucion != null) {
-            posiciones.acreditarCompra(reserva.cuentaId(), evento.simbolo(), ejecucion.cantidad(), ejecucion.precio());
+            posiciones.acreditar(reserva.cuentaId(), evento.simbolo(), ejecucion.cantidad(), ejecucion.precio());
             movimientos.registrar(reserva.cuentaId(), TipoMovimiento.COMPRA, -(delReservado + delDisponible),
-                    evento.simbolo(), ejecucion.cantidad(), ejecucion.operacionId(), ahora);
+                    evento.simbolo(), (long) ejecucion.cantidad(), ejecucion.operacionId(), ahora);
         }
         if (liberado > 0) {
             movimientos.registrar(reserva.cuentaId(), TipoMovimiento.LIBERACION, liberado, evento.simbolo(), null,
@@ -125,9 +143,53 @@ public class ServicioLiquidacion {
         }
         reservas.registrar(reserva.id(), delReservado, liberado, estado, ahora);
 
-        log.info("Orden {} liquidada ({}): {} COP pagados, {} COP liberados, reserva {}", evento.ordenId(),
+        log.info("Compra {} liquidada ({}): {} COP pagados, {} COP liberados, reserva {}", evento.ordenId(),
                 evento.estado(), delReservado + delDisponible, liberado, estado);
-        return true;
+    }
+
+    /**
+     * La venta entrega las acciones de cada ejecución, que salen de la posición y de lo reservado, y cobra
+     * precio × acciones en el disponible. Al terminar, las reservadas que sobran vuelven a estar libres. El costo
+     * promedio no cambia: las acciones que quedan costaron lo mismo.
+     */
+    private void liquidarVenta(Reserva reserva, EventoOrden evento, Instant ahora) {
+        if (!reserva.simbolo().equals(evento.simbolo())) {
+            throw new EventoImposibleException("la reserva es de " + reserva.simbolo() + " y el evento de "
+                    + evento.simbolo());
+        }
+        EjecucionOrden ejecucion = evento.ejecucion();
+        long pendiente = reserva.pendiente();
+        long entregadas = 0;
+        if (ejecucion != null) {
+            entregadas = ejecucion.cantidad();
+            if (entregadas > pendiente) {
+                throw new EventoImposibleException("se venderían " + entregadas + " acciones y la reserva solo tiene "
+                        + pendiente);
+            }
+            if (!posiciones.entregar(reserva.cuentaId(), reserva.simbolo(), entregadas)) {
+                throw new EventoImposibleException("la posición ya no tiene reservadas las " + entregadas
+                        + " acciones");
+            }
+            long ingreso = Math.multiplyExact(ejecucion.precio(), entregadas);
+            cuentas.acreditarVenta(reserva.cuentaId(), ingreso, ahora);
+            movimientos.registrar(reserva.cuentaId(), TipoMovimiento.VENTA, ingreso, reserva.simbolo(), entregadas,
+                    ejecucion.operacionId(), ahora);
+        }
+
+        long liberadas = 0;
+        EstadoReserva estado = EstadoReserva.ACTIVA;
+        if (evento.estado().terminado()) {
+            liberadas = pendiente - entregadas;
+            if (liberadas > 0 && !posiciones.liberar(reserva.cuentaId(), reserva.simbolo(), liberadas)) {
+                throw new EventoImposibleException("la posición ya no tiene reservadas las " + liberadas
+                        + " acciones que sobran");
+            }
+            estado = reserva.montoConsumido() + entregadas > 0 ? EstadoReserva.CONSUMIDA : EstadoReserva.LIBERADA;
+        }
+        reservas.registrar(reserva.id(), entregadas, liberadas, estado, ahora);
+
+        log.info("Venta {} liquidada ({}): {} acciones entregadas, {} liberadas, reserva {}", evento.ordenId(),
+                evento.estado(), entregadas, liberadas, estado);
     }
 
     /** Lo que cuesta la ejecución. Una compra LIMITE nunca se ejecuta por encima de su límite (RF-24). */

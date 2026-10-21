@@ -13,7 +13,10 @@
 # recibe 404. Luego, los criterios de HU-05: con una venta de 100 a 4900 en el libro, una compra de 100 a 5000 se
 # ejecuta a 4900 y se liberan los 10.000 sobrantes (saldo, reservado y movimientos cuadran); una compra sin
 # contraparte queda ABIERTA con su dinero reservado, y una sin saldo suficiente queda RECHAZADA con el motivo.
-# Por último renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve.
+# Las ventas son del creador de mercado, que auth-service crea al arrancar y que recibe en portfolio-service las
+# acciones emitidas del instrumento nuevo (RF-59); una venta de quien no tiene acciones queda RECHAZADA. Al final
+# se comprueba por la API que el creador cobró lo que pagó el comprador (HU-06). Por último renueva el token y
+# comprueba que, después de cerrar sesión, el token de refresco ya no sirve.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
 # (la prueba arranca los suyos en los puertos 8080 a 8084).
@@ -91,6 +94,11 @@ campo() {
     sed -E "s/.*\"$1\":\"([^\"]+)\".*/\1/" "$LOGS/respuesta.json"
 }
 
+# Saca un campo numérico de la última respuesta JSON. Uso: numero NOMBRE
+numero() {
+    sed -E "s/.*\"$1\":(-?[0-9]+).*/\1/" "$LOGS/respuesta.json"
+}
+
 # Consulta una ruta cada segundo hasta que la respuesta tenga el texto (por ejemplo, el estado que le pone el motor
 # o la reserva, que llegan de forma asíncrona); si no aparece en 30 s, la muestra y falla.
 # Uso: esperar_respuesta DESCRIPCIÓN RUTA TOKEN TEXTO
@@ -123,7 +131,12 @@ echo "2. Arrancando auth-service, market-data-service, portfolio-service, matchi
 SUFIJO=$(date +%s)
 CORREO_ADMIN="admin_$SUFIJO@bolsasim.co"
 CLAVE_ADMIN="$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
+# El creador de mercado es uno solo y la base lo conserva entre corridas: su correo y su contraseña son fijos, y
+# sirven solo para esta prueba. En la primera corrida se crea; en las siguientes, auth-service vuelve a publicarlo
+CORREO_CREADOR="creador_mercado@bolsasim.co"
+CLAVE_CREADOR="creador-de-prueba-2026"
 BOLSASIM_ADMIN_CORREO="$CORREO_ADMIN" BOLSASIM_ADMIN_CONTRASENA="$CLAVE_ADMIN" BOLSASIM_ADMIN_ALIAS="admin_$SUFIJO" \
+BOLSASIM_CREADOR_MERCADO_CORREO="$CORREO_CREADOR" BOLSASIM_CREADOR_MERCADO_CONTRASENA="$CLAVE_CREADOR" \
     "$JAVA" -jar auth-service/target/auth-service-*[0-9T].jar > "$LOGS/auth-service.log" 2>&1 &
 USUARIOS=$!
 "$JAVA" -jar market-data-service/target/market-data-service-*[0-9T].jar > "$LOGS/market-data-service.log" 2>&1 &
@@ -140,6 +153,8 @@ trap 'kill $USUARIOS $MERCADO $CUENTAS $MOTOR $ORDENES $ENTRADA 2>/dev/null || t
 
 esperar "Started AuthServiceApplication" "$LOGS/auth-service.log" 60
 esperar "Administrador admin_$SUFIJO creado" "$LOGS/auth-service.log" 30
+# Recién creado o, en las corridas siguientes, publicado otra vez
+esperar "Usuario .* publicado en users.registered" "$LOGS/auth-service.log" 30
 esperar "Started MarketDataServiceApplication" "$LOGS/market-data-service.log" 60
 esperar "Started PortfolioServiceApplication" "$LOGS/portfolio-service.log" 60
 esperar "Started OrderServiceApplication" "$LOGS/order-service.log" 60
@@ -207,6 +222,9 @@ echo "5. El ADMIN crea un instrumento con todo corriendo..."
 comprobar "Login del ADMIN" "$(pedir POST /api/auth/login "{\"correo\":\"$CORREO_ADMIN\",\"contrasena\":\"$CLAVE_ADMIN\"}")" 200
 TOKEN_ADMIN=$(campo tokenAcceso)
 comprobar "Cuenta del ADMIN" "$(pedir GET /api/cuenta "" "$TOKEN_ADMIN")" 404
+comprobar "Login del creador de mercado" \
+    "$(pedir POST /api/auth/login "{\"correo\":\"$CORREO_CREADOR\",\"contrasena\":\"$CLAVE_CREADOR\"}")" 200
+TOKEN_CREADOR=$(campo tokenAcceso)
 # Un símbolo de 5 letras al azar en cada corrida: la base conserva los instrumentos de corridas anteriores
 LETRAS=ABCDEFGHIJKLMNOPQRSTUVWXYZ
 SIMBOLO=""
@@ -229,6 +247,13 @@ comprobar "Consultar el catálogo como inversionista" "$(pedir GET /api/instrume
 grep -q "\"simbolo\":\"$SIMBOLO\"" "$LOGS/respuesta.json"
 grep -q '"simbolo":"ANDX"' "$LOGS/respuesta.json"
 esperar "Instrumento $SIMBOLO guardado en la copia local" "$LOGS/order-service.log" 30
+# La oferta inicial: las 100.000 acciones emitidas van al creador de mercado
+esperar "Emisión de $SIMBOLO: 100000 acciones a 5000 COP para el creador de mercado" "$LOGS/portfolio-service.log" 30
+comprobar "Cuenta del creador de mercado" "$(pedir GET /api/cuenta "" "$TOKEN_CREADOR")" 200
+CREADOR_ANTES=$(numero saldoDisponible)
+comprobar "Emisión en los movimientos del creador" \
+    "$(pedir GET "/api/cuenta/movimientos?tipo=EMISION&tamano=100" "" "$TOKEN_CREADOR")" 200
+grep -q "\"tipo\":\"EMISION\",\"monto\":0,\"simbolo\":\"$SIMBOLO\",\"cantidad\":100000" "$LOGS/respuesta.json"
 echo "   $SIMBOLO creado (201) y ya está en order-service; sin token 401, inversionista 403, repetido 409, tick 400"
 
 echo "6. Comprobando las órdenes rechazadas..."
@@ -257,8 +282,16 @@ echo "   Sin token 401, token alterado 401, usuarioId en el cuerpo 400, instrume
 echo "   suspendido 422 hasta que se reactiva; directo a order-service también 401; fuera del tick o de la banda 422"
 
 echo "7. Enviando con el token una venta y una compra de $SIMBOLO a 5000..."
-comprobar "Venta" "$(pedir POST /api/ordenes "${ORDEN/COMPRA/VENTA}" "$TOKEN")" 202
+# El usuario no tiene acciones: su venta se rechaza al reservarlas (HU-06, RF-18)
+comprobar "Venta sin acciones" "$(pedir POST /api/ordenes "${ORDEN/COMPRA/VENTA}" "$TOKEN")" 202
 VENTA=$(campo ordenId)
+esperar_respuesta "Venta sin acciones" "/api/ordenes/$VENTA" "$TOKEN" '"estado":"RECHAZADA"'
+grep -q "\"motivo\":\"Acciones insuficientes: tienes 0 de $SIMBOLO disponibles y la orden vende 10.\"" \
+    "$LOGS/respuesta.json"
+# El creador de mercado sí las tiene: deja su venta en el libro
+comprobar "Venta del creador de mercado" "$(pedir POST /api/ordenes "${ORDEN/COMPRA/VENTA}" "$TOKEN_CREADOR")" 202
+VENTA_CREADOR=$(campo ordenId)
+esperar_respuesta "Venta del creador en el libro" "/api/ordenes/$VENTA_CREADOR" "$TOKEN_CREADOR" '"estado":"ABIERTA"'
 CLAVE_COMPRA=$(nueva_clave)
 comprobar "Compra" "$(CLAVE=$CLAVE_COMPRA pedir POST /api/ordenes "$ORDEN" "$TOKEN")" 202
 COMPRA=$(campo ordenId)
@@ -276,8 +309,8 @@ esperar "Ejecución: 10 acciones de $SIMBOLO a 5000 COP .*($ID)" "$LOGS/matching
 esperar "Evento .* del outbox publicado en orders.requested (clave $ID" "$LOGS/order-service.log" 10
 esperar "Evento .* del outbox publicado en reservations.events (clave $ID" "$LOGS/portfolio-service.log" 10
 esperar "Evento .* del outbox publicado en orders.commands (clave $SIMBOLO" "$LOGS/order-service.log" 10
-echo "   Las reservas se aceptaron, los comandos salieron del outbox y el motor ejecutó las órdenes a nombre del"
-echo "   usuario del token"
+echo "   La venta sin acciones quedó RECHAZADA; las reservas se aceptaron, los comandos salieron del outbox y el motor"
+echo "   ejecutó la compra del usuario del token contra la venta del creador de mercado"
 
 # La compra se envió dos veces con la misma clave: a orders.commands debe haber llegado un solo comando
 COMANDOS=$(MSYS_NO_PATHCONV=1 docker exec bolsasim-kafka /opt/kafka/bin/kafka-console-consumer.sh \
@@ -291,9 +324,11 @@ echo "   Compra repetida con la misma clave: 202 con la misma orden y un solo co
 
 echo "   Consultando las órdenes guardadas..."
 # El motor publica en orders.events y order-service actualiza cada orden de forma asíncrona: hay que esperarlo
-for orden in "$COMPRA" "$VENTA"; do
+for orden in "$COMPRA:$TOKEN" "$VENTA_CREADOR:$TOKEN_CREADOR"; do
+    token=${orden#*:}
+    orden=${orden%%:*}
     for _ in $(seq 1 30); do
-        comprobar "Consultar la orden $orden" "$(pedir GET "/api/ordenes/$orden" "" "$TOKEN")" 200
+        comprobar "Consultar la orden $orden" "$(pedir GET "/api/ordenes/$orden" "" "$token")" 200
         grep -q '"estado":"EJECUTADA"' "$LOGS/respuesta.json" && break
         sleep 1
     done
@@ -311,7 +346,7 @@ if [ "$OPERACIONES" != 1 ]; then
     echo "La compra aparece en $OPERACIONES operaciones de trades.executed, no en 1"
     exit 1
 fi
-echo "   La venta y la compra quedaron EJECUTADA, 10 acciones a 5000; una sola operación en trades.executed"
+echo "   La venta del creador y la compra quedaron EJECUTADA, 10 acciones a 5000; una sola operación en trades.executed"
 # Una por página: la más reciente (la compra) primero, y el cursor lleva a la venta
 comprobar "Primera página de una orden" "$(pedir GET "/api/ordenes?tamano=1" "" "$TOKEN")" 200
 grep -q "\"id\":\"$COMPRA\"" "$LOGS/respuesta.json"
@@ -326,14 +361,14 @@ comprobar "Consultar órdenes directo a order-service sin token" "$(GATEWAY=$ORD
 echo "   Paginación con cursor 200, página de 101 400, orden de otro 404, sin token 401"
 
 echo "8. Comprando a precio límite (HU-05)..."
-# La compra de 10 a 5000 del paso 7 ya se pagó: 50.000 menos. La venta todavía no se liquida (llega con HU-06)
+# La compra de 10 a 5000 del paso 7 ya se pagó: 50.000 menos
 esperar_respuesta "Cuenta después de la compra del paso 7" /api/cuenta "$TOKEN" \
     '"saldoDisponible":9950000,"saldoReservado":0,"saldoTotal":9950000'
-# El otro usuario deja una venta de 100 a 4900 en el libro
+# El creador de mercado deja una venta de 100 a 4900 en el libro
 VENTA_4900="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"VENTA\",\"tipo\":\"LIMITE\",\"precioLimite\":4900,\"cantidad\":100}"
-comprobar "Venta de 100 a 4900 del otro usuario" "$(pedir POST /api/ordenes "$VENTA_4900" "$TOKEN_OTRO")" 202
-VENTA_OTRO=$(campo ordenId)
-esperar_respuesta "Venta del otro usuario en el libro" "/api/ordenes/$VENTA_OTRO" "$TOKEN_OTRO" '"estado":"ABIERTA"'
+comprobar "Venta de 100 a 4900 del creador" "$(pedir POST /api/ordenes "$VENTA_4900" "$TOKEN_CREADOR")" 202
+VENTA_4900_ID=$(campo ordenId)
+esperar_respuesta "Venta del creador en el libro" "/api/ordenes/$VENTA_4900_ID" "$TOKEN_CREADOR" '"estado":"ABIERTA"'
 # Se reservan 500.000, se ejecuta a 4900 (el precio de la venta que esperaba) y se liberan los 10.000 sobrantes
 COMPRA_5000="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":100}"
 comprobar "Compra de 100 a 5000" "$(pedir POST /api/ordenes "$COMPRA_5000" "$TOKEN")" 202
@@ -369,6 +404,17 @@ grep -q '"saldoDisponible":9010000,"saldoReservado":450000' "$LOGS/respuesta.jso
 echo "   Compra sin contraparte ABIERTA con 450.000 reservados; sin saldo, RECHAZADA con \"Saldo insuficiente: tienes"
 echo "   9.010.000 COP disponibles\" y la cuenta sin cambios"
 
+echo "   Comprobando lo que cobró el creador de mercado (HU-06)..."
+# Vendió 10 a 5000 y 100 a 4900: cobró los 540.000 que pagó el comprador (RNF-08)
+CREADOR_ESPERADO=$((CREADOR_ANTES + 540000))
+esperar_respuesta "Cuenta del creador después de vender" /api/cuenta "$TOKEN_CREADOR" \
+    "\"saldoDisponible\":$CREADOR_ESPERADO,"
+comprobar "Ventas del creador" "$(pedir GET "/api/cuenta/movimientos?tipo=VENTA&tamano=2" "" "$TOKEN_CREADOR")" 200
+grep -q "\"tipo\":\"VENTA\",\"monto\":490000,\"simbolo\":\"$SIMBOLO\",\"cantidad\":100" "$LOGS/respuesta.json"
+grep -q "\"tipo\":\"VENTA\",\"monto\":50000,\"simbolo\":\"$SIMBOLO\",\"cantidad\":10" "$LOGS/respuesta.json"
+echo "   El creador cobró 540.000 (de $CREADOR_ANTES a $CREADOR_ESPERADO) y el comprador pagó lo mismo: VENTA 50.000 y"
+echo "   490.000 en sus movimientos"
+
 echo "9. Renovando el token y cerrando sesión..."
 comprobar "Renovar el token" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200
 comprobar "Cerrar sesión sin token" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
@@ -378,4 +424,4 @@ comprobar "Cerrar sesión" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"
 comprobar "Renovar después de cerrar sesión" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 echo "   Refresco 200, logout sin token 401, logout 204 y refresco revocado 401"
 
-echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, las órdenes quedaron guardadas, reservaron su saldo, viajaron por Kafka, el motor las ejecutó y portfolio-service las liquidó. Logs en $LOGS/"
+echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, el creador de mercado recibió sus acciones, las órdenes quedaron guardadas, reservaron su saldo o sus acciones, viajaron por Kafka, el motor las ejecutó y portfolio-service liquidó al comprador y al vendedor. Logs en $LOGS/"

@@ -91,7 +91,9 @@ Content-Type: application/json
   "cantidad": 100
 }
 
-### 7. Venta límite de otro símbolo (puede caer en otra partición)
+### 7. Venta límite de otro símbolo (puede caer en otra partición). Necesitas acciones de CAFE: sin ellas queda
+###    RECHAZADA con "Acciones insuficientes: tienes 0 de CAFE disponibles y la orden vende 20." Al principio solo
+###    el creador de mercado tiene acciones: inicia sesión con él (ver el README) para vender.
 POST {{gateway}}/api/ordenes
 Idempotency-Key: peticion-07-cambia-esta-clave
 Authorization: Bearer {{token}}
@@ -333,8 +335,9 @@ Content-Type: application/json
   "cantidad": 300
 }
 
-### 33. Venta a mercado de 40 ANDX: cruza con la compra de la 6 (100 a 5000). Después, la 29 muestra la compra
-###     PARCIAL, 40 de 100 ejecutadas a precio promedio 5000.
+### 33. Venta a mercado de 40 ANDX: cruza con la compra de la 6 (100 a 5000). Envíala con el token del creador de
+###     mercado (o de alguien que tenga 40 ANDX libres). Después, la 29 muestra la compra PARCIAL, 40 de 100
+###     ejecutadas a precio promedio 5000.
 POST {{gateway}}/api/ordenes
 Idempotency-Key: peticion-33-cambia-esta-clave
 Authorization: Bearer {{token}}
@@ -366,8 +369,9 @@ Content-Type: application/json
 GET {{gateway}}/api/cuenta
 Authorization: Bearer {{token}}
 
-### 36. Tus movimientos de dinero, del más reciente al más viejo: SALDO_INICIAL, y RESERVA, COMPRA y LIBERACION
-###     de tus compras. Si hay más, pega "siguiente" en el parámetro despues.
+### 36. Tus movimientos, del más reciente al más viejo: SALDO_INICIAL; RESERVA, COMPRA y LIBERACION de tus
+###     compras; VENTA de tus ventas, y EMISION si eres el creador de mercado. Si hay más, pega "siguiente" en el
+###     parámetro despues.
 GET {{gateway}}/api/cuenta/movimientos?tamano=20
 Authorization: Bearer {{token}}
 

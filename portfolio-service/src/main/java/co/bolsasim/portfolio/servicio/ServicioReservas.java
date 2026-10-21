@@ -11,6 +11,8 @@ import co.bolsasim.portfolio.kafka.EventosProcesados;
 import co.bolsasim.portfolio.movimiento.RegistroMovimientos;
 import co.bolsasim.portfolio.movimiento.TipoMovimiento;
 import co.bolsasim.portfolio.outbox.Outbox;
+import co.bolsasim.portfolio.posicion.Posicion;
+import co.bolsasim.portfolio.posicion.RepositorioPosiciones;
 import co.bolsasim.portfolio.reserva.RepositorioReservas;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -23,12 +25,12 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * La primera mitad de la saga de la reserva (RF-17, RF-18): por cada orden nueva (orders.requested) bloquea el
- * dinero que necesita y responde en reservations.events si la orden puede ir al motor.
+ * dinero o las acciones que necesita y responde en reservations.events si la orden puede ir al motor.
  *
- * <p>Todo en una transacción por solicitud: la marca del evento, el saldo, la reserva, su movimiento y la respuesta
- * en el outbox se guardan juntos o no se guarda nada. Las solicitudes de un usuario llegan por una sola partición
- * (clave = usuario), una tras otra, y el saldo se revisa en el mismo UPDATE que lo reserva: dos órdenes nunca
- * gastan el mismo dinero.
+ * <p>Todo en una transacción por solicitud: la marca del evento, el saldo o la posición, la reserva, su movimiento y
+ * la respuesta en el outbox se guardan juntos o no se guarda nada. Las solicitudes de un usuario llegan por una sola
+ * partición (clave = usuario), una tras otra, y lo disponible se revisa en el mismo UPDATE que lo reserva: dos
+ * órdenes nunca gastan el mismo dinero ni venden las mismas acciones, aunque una liquidación toque la fila a la vez.
  */
 @Service
 public class ServicioReservas {
@@ -39,22 +41,25 @@ public class ServicioReservas {
     private final ServicioCuentas servicioCuentas;
     private final RepositorioCuentas cuentas;
     private final RepositorioReservas reservas;
+    private final RepositorioPosiciones posiciones;
     private final RegistroMovimientos movimientos;
     private final Outbox outbox;
 
     public ServicioReservas(EventosProcesados procesados, ServicioCuentas servicioCuentas, RepositorioCuentas cuentas,
-                            RepositorioReservas reservas, RegistroMovimientos movimientos, Outbox outbox) {
+                            RepositorioReservas reservas, RepositorioPosiciones posiciones,
+                            RegistroMovimientos movimientos, Outbox outbox) {
         this.procesados = procesados;
         this.servicioCuentas = servicioCuentas;
         this.cuentas = cuentas;
         this.reservas = reservas;
+        this.posiciones = posiciones;
         this.movimientos = movimientos;
         this.outbox = outbox;
     }
 
     /**
-     * Una compra reserva dinero; si el disponible no alcanza, se rechaza con el motivo (RF-18). Una venta se acepta
-     * sin reservar nada hasta que lleguen las reservas de acciones (HU-06).
+     * Una compra reserva dinero y una venta, acciones (LIMITE o a MERCADO); si no alcanza, se rechaza con el motivo
+     * (RF-18).
      *
      * @return false si la solicitud ya se había procesado
      */
@@ -75,16 +80,31 @@ public class ServicioReservas {
         // Si su users.registered todavía no llegó, la cuenta se abre ahora, como en la primera consulta
         Cuenta cuenta = servicioCuentas.abrir(UUID.fromString(solicitud.usuarioId()));
 
-        ReservaProcesada respuesta;
-        if (solicitud.lado() == Lado.VENTA) {
-            respuesta = ReservaProcesada.aceptada(solicitud, 0, ahora);
-            log.info("Venta {} aceptada sin reservar acciones: las reservas de acciones llegan con HU-06",
-                    solicitud.ordenId());
-        } else {
-            respuesta = reservarDinero(cuenta, solicitud, ahora);
-        }
+        ReservaProcesada respuesta = solicitud.lado() == Lado.VENTA
+                ? reservarAcciones(cuenta, solicitud, ahora)
+                : reservarDinero(cuenta, solicitud, ahora);
         outbox.guardar(Topicos.RESERVATIONS_EVENTS, solicitud.usuarioId(), respuesta);
         return true;
+    }
+
+    /** Las acciones que vende la orden, de las libres: las que no están reservadas en otra venta. */
+    private ReservaProcesada reservarAcciones(Cuenta cuenta, SolicitudReserva solicitud, Instant ahora) {
+        long acciones = solicitud.cantidad();
+        if (posiciones.reservar(cuenta.id(), solicitud.simbolo(), acciones)) {
+            reservas.crearDeAcciones(cuenta.id(), solicitud.ordenId(), solicitud.simbolo(), acciones, ahora);
+            log.info("Orden {}: {} acciones de {} reservadas", solicitud.ordenId(), acciones, solicitud.simbolo());
+            return ReservaProcesada.aceptada(solicitud, acciones, ahora);
+        }
+
+        long libres = posiciones.buscar(cuenta.id(), solicitud.simbolo()).map(Posicion::libres).orElse(0L);
+        String motivo = motivoSinAcciones(libres, solicitud.simbolo(), acciones);
+        log.info("Orden {} rechazada: {}", solicitud.ordenId(), motivo);
+        return ReservaProcesada.rechazada(solicitud, motivo, ahora);
+    }
+
+    static String motivoSinAcciones(long libres, String simbolo, long vende) {
+        return "Acciones insuficientes: tienes " + Pesos.formato(libres) + " de " + simbolo
+                + " disponibles y la orden vende " + Pesos.formato(vende) + ".";
     }
 
     private ReservaProcesada reservarDinero(Cuenta cuenta, SolicitudReserva solicitud, Instant ahora) {
@@ -94,7 +114,7 @@ public class ServicioReservas {
             reservas.crearDeDinero(cuenta.id(), solicitud.ordenId(), precioLimite, monto.getAsLong(), ahora);
             // Sale del disponible y pasa al reservado: el total de la cuenta no cambia
             movimientos.registrar(cuenta.id(), TipoMovimiento.RESERVA, -monto.getAsLong(), solicitud.simbolo(),
-                    solicitud.cantidad(), solicitud.ordenId(), ahora);
+                    (long) solicitud.cantidad(), solicitud.ordenId(), ahora);
             log.info("Orden {}: {} COP reservados", solicitud.ordenId(), monto.getAsLong());
             return ReservaProcesada.aceptada(solicitud, monto.getAsLong(), ahora);
         }

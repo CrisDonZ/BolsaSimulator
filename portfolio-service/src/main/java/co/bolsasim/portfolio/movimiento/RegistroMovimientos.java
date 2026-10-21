@@ -23,7 +23,7 @@ public class RegistroMovimientos {
         this.jdbc = jdbc;
     }
 
-    public void registrar(UUID cuentaId, TipoMovimiento tipo, long monto, String simbolo, Integer cantidad,
+    public void registrar(UUID cuentaId, TipoMovimiento tipo, long monto, String simbolo, Long cantidad,
                           UUID referenciaId, Instant creadoEn) {
         jdbc.sql("""
                         INSERT INTO movimiento (id, cuenta_id, tipo, monto, simbolo, cantidad, referencia_id, creado_en)

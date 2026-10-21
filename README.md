@@ -44,9 +44,9 @@ Postman / curl ──▶ gateway                            (puerto 8082) ──
 | `eventos/` | Java puro, sin Spring: los eventos `ComandoOrden`, `SolicitudReserva`, `ReservaProcesada`, `UsuarioRegistrado`, `InstrumentoActualizado`, `EventoOrden` y `OperacionEjecutada`, los enums (como `EstadoOrden`) y los nombres de tópicos. Lo comparten todos los servicios. |
 | `order-service/` | API REST `POST /api/ordenes` y la consulta de tus órdenes (`GET /api/ordenes`, paginada por cursor, y `GET /api/ordenes/{id}`, HU-09). Rechaza con `422` un precio límite que no es múltiplo del tick o está a más de 10 % del último precio (RF-16). Guarda cada orden en la tabla ORDEN y su solicitud de reserva en OUTBOX en la misma transacción; un publicador la envía a `orders.requested` cada 100 ms, así nada se pierde si Kafka está caído (RNF-12). Cuando `reservations.events` trae la reserva aceptada, deja el comando de la orden en el outbox para `orders.commands`; si la trae rechazada, la orden queda `RECHAZADA` con el motivo (RF-18). Con el header `Idempotency-Key`, una orden enviada dos veces se crea una sola vez (HU-10). Vuelve a validar el JWT con la clave pública de auth-service y toma el usuario de la orden del token (`sub`), no del cuerpo. Escucha `users.registered` y `instruments.events` y guarda en su base una copia de los usuarios (tabla `usuario_registrado`) y de los instrumentos (tabla `instrumento`): acepta solo órdenes de usuarios registrados y de instrumentos activos. Escucha `orders.events` y actualiza cada orden; guarda cada ejecución en la tabla `ejecucion` y cada evento aplicado en `evento_procesado`, así un evento repetido no se aplica dos veces (RNF-09). Escucha `trades.executed` y guarda el último precio de cada instrumento, la referencia de la banda. |
 | `market-data-service/` | Por ahora, solo el catálogo de instrumentos (HU-22): `GET /api/instrumentos` para cualquier usuario con token, y crear, editar, suspender y reactivar solo para el rol `ADMIN`. Guarda la tabla INSTRUMENTO en PostgreSQL con Flyway, arranca con 10 instrumentos ficticios y publica cada cambio en `instruments.events`. Valida el JWT por su cuenta. El último precio y las velas llegarán en el sprint 4. |
-| `portfolio-service/` | La cuenta de cada usuario (HU-12): `GET /api/cuenta` (saldo disponible, reservado y total) y `GET /api/cuenta/movimientos` (filtrado por tipo y por fechas, paginado por cursor). Abre la cuenta con el saldo inicial al llegar `users.registered`, o la primera vez que el usuario la consulta si su evento no llegó. Escucha `orders.requested` y reserva el dinero de cada compra (RF-17): responde en `reservations.events`, con su propio outbox. Escucha `orders.events` y liquida cada compra: la paga con su reserva, le suma las acciones a la posición y libera lo que sobró (RF-30, RF-31). Guarda las tablas CUENTA, MOVIMIENTO, RESERVA, POSICION y OUTBOX en PostgreSQL con Flyway; ningún saldo ni posición puede quedar negativo (CHECK en la base, RNF-07). Valida el JWT por su cuenta. La consulta del portafolio llega con HU-11. |
+| `portfolio-service/` | La cuenta de cada usuario (HU-12): `GET /api/cuenta` (saldo disponible, reservado y total) y `GET /api/cuenta/movimientos` (filtrado por tipo y por fechas, paginado por cursor). Abre la cuenta con el saldo inicial al llegar `users.registered`, o la primera vez que el usuario la consulta si su evento no llegó. Escucha `instruments.events` y acredita las acciones emitidas de cada instrumento nuevo al creador de mercado, una sola vez por símbolo (RF-59). Escucha `orders.requested` y reserva el dinero de cada compra o las acciones de cada venta (RF-17): responde en `reservations.events`, con su propio outbox. Escucha `orders.events` y liquida cada operación con doble partida: el comprador paga con su reserva y recibe las acciones, el vendedor las entrega y cobra, y lo que sobra se libera (RF-30, RF-31, RNF-08). Guarda las tablas CUENTA, MOVIMIENTO, RESERVA, POSICION, EMISION y OUTBOX en PostgreSQL con Flyway; ningún saldo ni posición puede quedar negativo (CHECK en la base, RNF-07). Valida el JWT por su cuenta. La consulta del portafolio llega con HU-11. |
 | `matching-engine/` | El libro de órdenes (`libro/`, Java puro con pruebas JUnit) y su consumidor de Kafka. Por cada comando publica `EventoOrden` en `orders.events` y `OperacionEjecutada` en `trades.executed`, dentro de una transacción de Kafka junto con el offset del comando (RNF-10). Reconoce un comando repetido y reenvía lo mismo sin tocar el libro (RNF-09). |
-| `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. Vuelve a validar el JWT en las rutas protegidas: cada usuario solo consulta su propio perfil y solo cierra sus propias sesiones. Al arrancar crea el primer `ADMIN` con las variables `BOLSASIM_ADMIN_CORREO` y `BOLSASIM_ADMIN_CONTRASENA`. |
+| `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. Vuelve a validar el JWT en las rutas protegidas: cada usuario solo consulta su propio perfil y solo cierra sus propias sesiones. Al arrancar crea el primer `ADMIN` con las variables `BOLSASIM_ADMIN_CORREO` y `BOLSASIM_ADMIN_CONTRASENA`, y el bot creador de mercado (rol `BOT`) con `BOLSASIM_CREADOR_MERCADO_CORREO` y `BOLSASIM_CREADOR_MERCADO_CONTRASENA`. |
 | `gateway/` | Spring Cloud Gateway (WebFlux) en el puerto 8080: enruta a auth-service, order-service, market-data-service y portfolio-service y exige un JWT válido, verificado con la clave pública de auth-service, salvo para registrarse, iniciar sesión, renovar el token y leer la clave. Reenvía el token original sin cambiarlo. |
 | `docker-compose.yml` | Kafka (modo KRaft), creación de tópicos, Kafka UI y PostgreSQL. |
 | `postgres/init.sql` | Crea una base por servicio la primera vez que arranca PostgreSQL. |
@@ -83,7 +83,7 @@ Si tu contenedor de PostgreSQL es de antes de market-data-service o de portfolio
 ./mvnw clean install
 ```
 
-Debe terminar con `BUILD SUCCESS` y 354 pruebas pasadas: 120 de order-service, 36 de matching-engine, 83 de auth-service, 42 de market-data-service, 52 de portfolio-service y 21 del gateway. Las de integración usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
+Debe terminar con `BUILD SUCCESS` y 377 pruebas pasadas: 120 de order-service, 36 de matching-engine, 89 de auth-service, 42 de market-data-service, 69 de portfolio-service y 21 del gateway. Las de integración usan Docker (Testcontainers con PostgreSQL y Kafka); con Docker cerrado se saltan.
 
 **3. Arranca el motor** (terminal 1):
 
@@ -97,15 +97,17 @@ Debe terminar con `BUILD SUCCESS` y 354 pruebas pasadas: 120 de order-service, 3
 ./mvnw -pl order-service spring-boot:run
 ```
 
-**5. Arranca auth-service** (terminal 3). Las dos variables crean el primer administrador, que es quien gestiona los instrumentos; elige tu propia contraseña (de 8 a 72 caracteres), nunca la guardes en el repositorio (RNF-26):
+**5. Arranca auth-service** (terminal 3). Las dos primeras variables crean el primer administrador, que es quien gestiona los instrumentos; las otras dos, el bot creador de mercado, que recibe todas las acciones emitidas y es el primero que puede vender (ver *Oferta inicial* abajo). Elige tus propias contraseñas (de 8 a 72 caracteres), nunca las guardes en el repositorio (RNF-26):
 
 ```powershell
 $env:BOLSASIM_ADMIN_CORREO = "admin@bolsasim.co"
 $env:BOLSASIM_ADMIN_CONTRASENA = "una-contraseña-larga"
+$env:BOLSASIM_CREADOR_MERCADO_CORREO = "creador@bolsasim.co"
+$env:BOLSASIM_CREADOR_MERCADO_CONTRASENA = "otra-contraseña-larga"
 .\mvnw.cmd -pl auth-service spring-boot:run
 ```
 
-En Git Bash: `BOLSASIM_ADMIN_CORREO=admin@bolsasim.co BOLSASIM_ADMIN_CONTRASENA=una-contraseña-larga ./mvnw -pl auth-service spring-boot:run`. El log dice `Administrador admin creado`. Solo se crea si nadie usa ese correo: una cuenta que ya existe nunca se vuelve ADMIN, y la contraseña de un ADMIN ya creado no cambia aunque cambies la variable. Sin las variables, auth-service arranca igual, sin administrador (lo avisa en el log). El alias es `admin`; para usar otro, define `BOLSASIM_ADMIN_ALIAS`.
+En Git Bash: `BOLSASIM_ADMIN_CORREO=admin@bolsasim.co BOLSASIM_ADMIN_CONTRASENA=una-contraseña-larga BOLSASIM_CREADOR_MERCADO_CORREO=creador@bolsasim.co BOLSASIM_CREADOR_MERCADO_CONTRASENA=otra-contraseña-larga ./mvnw -pl auth-service spring-boot:run`. El log dice `Administrador admin creado` y `Creador de mercado creador_mercado creado`. Cada uno se crea solo si nadie usa ese correo: una cuenta que ya existe nunca se vuelve ADMIN ni BOT, y su contraseña no cambia aunque cambies la variable. Sin las variables, auth-service arranca igual, sin administrador o sin creador de mercado (lo avisa en el log); sin creador nadie recibe acciones, así que nadie puede vender. Los alias son `admin` y `creador_mercado`; para usar otros, define `BOLSASIM_ADMIN_ALIAS` y `BOLSASIM_CREADOR_MERCADO_ALIAS`.
 
 **6. Arranca market-data-service y portfolio-service** (terminales 4 y 5):
 
@@ -114,7 +116,7 @@ En Git Bash: `BOLSASIM_ADMIN_CORREO=admin@bolsasim.co BOLSASIM_ADMIN_CONTRASENA=
 ./mvnw -pl portfolio-service spring-boot:run
 ```
 
-market-data-service publica al arrancar los 10 instrumentos en `instruments.events`; en el log de order-service verás `Instrumento ANDX guardado en la copia local`. portfolio-service lee `users.registered` desde el principio y abre la cuenta de cada usuario: verás `Cuenta del usuario ... abierta con 10000000 COP`.
+market-data-service publica al arrancar los 10 instrumentos en `instruments.events`; en el log de order-service verás `Instrumento ANDX guardado en la copia local`. portfolio-service lee `users.registered` desde el principio y abre la cuenta de cada usuario: verás `Cuenta del usuario ... abierta con 10000000 COP`. También lee `instruments.events` y le da al creador de mercado las acciones emitidas de cada instrumento: verás `Emisión de ANDX: 1000000 acciones a 5000 COP para el creador de mercado`.
 
 **7. Arranca el gateway** (terminal 6):
 
@@ -255,16 +257,30 @@ Un doble clic en Comprar, o una app que reintenta porque se cayó la red, enviar
 
 ## Reservas
 
-Antes de llegar al motor, cada orden reserva lo que necesita (HU-05, RF-17). Así nadie compra con dinero que ya comprometió en otra orden, y la orden que se ejecuta siempre tiene con qué pagar.
+Antes de llegar al motor, cada orden reserva lo que necesita (HU-05, HU-06, RF-17). Así nadie compra con dinero que ya comprometió en otra orden ni vende acciones que ya puso en otra venta, y la orden que se ejecuta siempre tiene con qué pagar o qué entregar.
 
 1. order-service guarda la orden `PENDIENTE` y publica su solicitud en `orders.requested`, con el usuario como clave: las solicitudes de un usuario se procesan una tras otra.
-2. portfolio-service calcula la reserva: una compra límite reserva precio × cantidad; una a mercado, cantidad × último precio × 1,10. Pasa ese monto del disponible al reservado en un solo `UPDATE` que también revisa que alcance, así dos órdenes a la vez nunca gastan el mismo saldo.
-3. Responde en `reservations.events`. Con la reserva **aceptada**, order-service envía la orden al motor. Con la reserva **rechazada**, la orden queda `RECHAZADA` con el motivo, por ejemplo "Saldo insuficiente: tienes 1.000.000 COP disponibles y la orden necesita 50.000.000 COP.", y nunca llega al motor.
-4. Cuando el motor la ejecuta, portfolio-service paga cada ejecución con la reserva, suma las acciones a tu posición (con su costo promedio) y libera lo que se pagó por debajo del límite. Cuando la orden termina, libera lo que quede.
+2. portfolio-service calcula la reserva. Una compra límite reserva precio × cantidad, y una a mercado, cantidad × último precio × 1,10: ese monto pasa del disponible al reservado. Una venta, límite o a mercado, reserva las acciones que vende, de las libres de su posición. Cada reserva es un solo `UPDATE` que también revisa que alcance, así dos órdenes a la vez nunca gastan el mismo saldo ni venden las mismas acciones.
+3. Responde en `reservations.events`. Con la reserva **aceptada**, order-service envía la orden al motor. Con la reserva **rechazada**, la orden queda `RECHAZADA` con el motivo, por ejemplo "Saldo insuficiente: tienes 1.000.000 COP disponibles y la orden necesita 50.000.000 COP." o "Acciones insuficientes: tienes 400 de ANDX disponibles y la orden vende 500.", y nunca llega al motor.
+4. Cuando el motor la ejecuta, portfolio-service liquida a los dos lados (RF-30). El comprador paga cada ejecución con su reserva, recibe las acciones (con su costo promedio) y libera lo que se pagó por debajo del límite. El vendedor entrega las acciones reservadas y cobra precio × acciones en su disponible; su costo promedio no cambia. Cuando la orden termina, ejecutada o cancelada, se libera lo que quede: el dinero que sobró o las acciones que no se vendieron (RF-31).
 
-Ejemplo de HU-05: con una venta de 100 a 4.900 en el libro, una compra límite de 100 a 5.000 reserva 500.000, se ejecuta a 4.900 (el precio de la orden que esperaba), paga 490.000 y libera los 10.000 sobrantes. En tus movimientos aparecen `RESERVA` −500.000, `COMPRA` −490.000 y `LIBERACION` +10.000.
+Ejemplo de HU-05: con una venta de 100 a 4.900 en el libro, una compra límite de 100 a 5.000 reserva 500.000, se ejecuta a 4.900 (el precio de la orden que esperaba), paga 490.000 y libera los 10.000 sobrantes. En los movimientos del comprador aparecen `RESERVA` −500.000, `COMPRA` −490.000 y `LIBERACION` +10.000; en los del vendedor, `VENTA` +490.000.
 
-Por ahora las ventas se aceptan sin reservar acciones y su liquidación (el dinero para el vendedor, las acciones que salen) llega con HU-06: nadie tiene acciones todavía, porque el bot creador de mercado recibe las emitidas con HU-24.
+Ejemplo de HU-06: con 100 acciones libres, una venta límite de 60 las reserva y te quedan 40 libres. Si se ejecutan 40 y la cancelas, entregas 40, cobras su precio y las 20 que no se vendieron vuelven a estar libres.
+
+**Doble partida (RNF-08).** Lo que paga el comprador lo cobra el vendedor, y las acciones que salen de uno entran al otro. Después de cualquier secuencia de operaciones, la suma de `saldo_disponible + saldo_reservado` de todas las cuentas no cambia, y las posiciones de cada símbolo suman sus acciones emitidas. Una prueba (`ConservacionIntegracionTest`) lo comprueba con compras, ventas, parciales y cancelaciones entre el creador de mercado y dos inversionistas.
+
+## Oferta inicial
+
+Las acciones no se crean al comprarlas: cada instrumento tiene sus acciones emitidas, y todas empiezan en la cuenta del **bot creador de mercado** (RF-59), con costo promedio igual al precio inicial. Después solo cambian de dueño.
+
+- auth-service crea el bot al arrancar (variables `BOLSASIM_CREADOR_MERCADO_*`, paso 5) y publica su `users.registered` con `creadorDeMercado: true`. Lo vuelve a publicar en cada arranque, con el mismo `eventoId`, por si el primero se perdió con Kafka caído; quien ya lo procesó lo ignora.
+- portfolio-service lee `instruments.events` y, la primera vez que ve un símbolo, acredita sus acciones emitidas al creador, con un movimiento `EMISION` (monto 0). La tabla `emision` tiene el símbolo como llave: editar, suspender o reactivar el instrumento, o el mismo evento otra vez, no emite de nuevo.
+- Si el instrumento llega antes que la cuenta del creador, la emisión queda `PENDIENTE` y se aplica cuando llega su `users.registered`. Nunca se pierde.
+- Hay un solo creador de mercado: si llegara otro, no recibe nada y queda un ERROR en el log.
+- Para vender como creador de mercado, inicia sesión con su correo y su contraseña y envía órdenes de venta como cualquier usuario. Los bots que operan solos llegan con HU-24.
+
+Si tu base de desarrollo es de antes de este cambio, tiene posiciones que salieron de la nada con las compras de HU-05 y no cuadran con RNF-08. Para empezar de cero, `docker compose down` y `docker compose up -d` (se borran todos los datos).
 
 ## Tu cuenta
 
@@ -276,8 +292,8 @@ Invoke-RestMethod -Uri http://localhost:8080/api/cuenta -Headers $auth
 ```
 
 - **Saldo:** `saldoDisponible` es lo que puedes usar, `saldoReservado` lo bloqueado en órdenes abiertas (ver *Reservas*) y `saldoTotal` la suma.
-- **Movimientos:** cada entrada o salida de dinero, con su monto (positivo entra, negativo sale), la acción y la cantidad si aplica, y la orden u operación de origen. `RESERVA` y `LIBERACION` mueven dinero entre el disponible y el reservado de una orden; `COMPRA` es lo que pagaste en una operación. Así, `SALDO_INICIAL` + `COMPRA` + `VENTA` es tu saldo total. `VENTA` llega con HU-06 y `REINICIO` con HU-25.
-- **Filtros:** `tipo` (uno de los seis), `desde` y `hasta` (días `AAAA-MM-DD` en hora de Colombia, los dos incluidos completos). La paginación es la misma por cursor que la de las órdenes: `tamano` de 1 a 100, y `siguiente` va en `despues`.
+- **Movimientos:** cada entrada o salida de dinero, con su monto (positivo entra, negativo sale), la acción y la cantidad si aplica, y la orden u operación de origen. `RESERVA` y `LIBERACION` mueven dinero entre el disponible y el reservado de una orden; `COMPRA` es lo que pagaste en una operación y `VENTA` lo que cobraste. Así, `SALDO_INICIAL` + `COMPRA` + `VENTA` es tu saldo total. `EMISION` (monto 0) son las acciones que recibe el creador de mercado, y `REINICIO` llega con HU-25.
+- **Filtros:** `tipo` (uno de los siete), `desde` y `hasta` (días `AAAA-MM-DD` en hora de Colombia, los dos incluidos completos). La paginación es la misma por cursor que la de las órdenes: `tamano` de 1 a 100, y `siguiente` va en `despues`.
 - **Nadie ve la cuenta de otro:** las rutas no llevan id; la cuenta siempre es la del token.
 - **Ningún saldo queda negativo:** además de las reglas del servicio, la base lo rechaza con un CHECK (RNF-07).
 
@@ -360,28 +376,29 @@ Cada símbolo tiene su libro con las compras y ventas que esperan contraparte. R
 - El precio de la ejecución es el de la orden que ya estaba esperando.
 - LIMITE: lo que no se ejecuta queda en el libro. MERCADO: lo que sobra se cancela y nunca queda en el libro (RF-26).
 
-Pruébalo con los servicios y el gateway corriendo y el correo y la contraseña de un usuario registrado:
+Pruébalo con los servicios y el gateway corriendo: el creador de mercado vende (es el único que tiene acciones al principio) y un usuario registrado compra:
 
 ```powershell
+$creador = @{ Correo = "creador@bolsasim.co"; Contrasena = "otra-contraseña-larga" }
 $yo = @{ Correo = "cris@correo.com"; Contrasena = "secreta123" }
-.\enviar-ordenes.ps1 @yo -Simbolos ANDX -Lado VENTA -Precio 5000 -Cantidad 100 -Veces 1
+.\enviar-ordenes.ps1 @creador -Simbolos ANDX -Lado VENTA -Precio 5000 -Cantidad 100 -Veces 1
 .\enviar-ordenes.ps1 @yo -Simbolos ANDX -Lado COMPRA -Precio 5100 -Cantidad 150 -Veces 1
 ```
 
-En el log de matching-engine verás `Ejecución: 100 acciones de ANDX a 5000 COP ...` y después `Libro ANDX | mejor compra 5100 | mejor venta - | 3 mensajes publicados` (la operación y un evento por cada orden): las 50 acciones que faltaron quedaron esperando. Con `GET /api/ordenes` lo ves desde order-service: la venta `EJECUTADA` (100 de 100 a 5000) y la compra `PARCIAL` (100 de 150, precio promedio 5000).
+En el log de matching-engine verás `Ejecución: 100 acciones de ANDX a 5000 COP ...` y después `Libro ANDX | mejor compra 5100 | mejor venta - | 3 mensajes publicados` (la operación y un evento por cada orden): las 50 acciones que faltaron quedaron esperando. Con `GET /api/ordenes` lo ves desde order-service: la venta del creador `EJECUTADA` (100 de 100 a 5000) y tu compra `PARCIAL` (100 de 150, precio promedio 5000). Con `GET /api/cuenta`, el creador cobró 500.000 y tú los pagaste. Si ANDX ya operó a otro precio, ajusta los precios a ±10 % del último.
 
 Los libros viven en memoria: si reinicias matching-engine empiezan vacíos.
 
 ## Prueba de integración
 
-Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cinco servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria), registra un usuario, comprueba que su evento llegue a `users.registered`, a order-service y a portfolio-service, inicia sesión, consulta su saldo de 10.000.000 y su movimiento `SALDO_INICIAL` (el ADMIN recibe 404), comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; un precio fuera del tick o de la banda de ±10 % recibe 422. Con el token se envían una venta y una compra de ese instrumento que se cruzan: cada una pide su reserva a portfolio-service, y se revisa que sus comandos salgan del outbox y que el motor registre la ejecución a nombre del usuario del token. La compra se reenvía con la misma `Idempotency-Key` y se comprueba que a `orders.commands` llega un solo comando. Las dos órdenes quedan `EJECUTADA` con su precio promedio (lo publica el motor en `orders.events`), hay una sola operación de la compra en `trades.executed`, se recorren página por página con el cursor, y otro usuario recibe 404. Después comprueba los criterios de HU-05: con una venta de 100 a 4.900 del otro usuario en el libro, una compra de 100 a 5.000 se ejecuta a 4.900, el saldo queda en 9.460.000 sin nada reservado y aparecen los movimientos `RESERVA`, `COMPRA` y `LIBERACION` (10.000); una compra sin contraparte queda `ABIERTA` con 450.000 reservados, y una sin saldo suficiente queda `RECHAZADA` con "Saldo insuficiente: tienes 9.010.000 COP disponibles...". Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8084) y ten Docker abierto:
+Comprueba todo el camino de una vez, siempre a través del gateway: levanta Kafka y PostgreSQL, arranca los cinco servicios y el gateway (auth-service con un ADMIN nuevo y una contraseña aleatoria, y el creador de mercado, con un correo y una contraseña fijos que solo sirven para la prueba), registra un usuario, comprueba que su evento llegue a `users.registered`, a order-service y a portfolio-service, inicia sesión, consulta su saldo de 10.000.000 y su movimiento `SALDO_INICIAL` (el ADMIN recibe 404), comprueba que una orden sin token o con el token alterado reciba 401 (también llamando directo a los servicios, sin el gateway) y una con `usuarioId` en el cuerpo reciba 400. Después el ADMIN crea un instrumento con un símbolo al azar, con todo corriendo (un inversionista recibe 403 y repetirlo, 409), lo suspende (las órdenes reciben 422) y lo reactiva; un precio fuera del tick o de la banda de ±10 % recibe 422, y el creador de mercado recibe sus 100.000 acciones emitidas (movimiento `EMISION`). Una venta del usuario, que no tiene acciones, queda `RECHAZADA` con "Acciones insuficientes...". El creador vende y el usuario compra: cada orden pide su reserva a portfolio-service, y se revisa que sus comandos salgan del outbox y que el motor registre la ejecución a nombre del usuario del token. La compra se reenvía con la misma `Idempotency-Key` y se comprueba que a `orders.commands` llega un solo comando. Las dos órdenes quedan `EJECUTADA` con su precio promedio (lo publica el motor en `orders.events`), hay una sola operación de la compra en `trades.executed`, se recorren página por página con el cursor, y otro usuario recibe 404. Después comprueba los criterios de HU-05: con una venta de 100 a 4.900 del creador de mercado en el libro, una compra de 100 a 5.000 se ejecuta a 4.900, el saldo queda en 9.460.000 sin nada reservado y aparecen los movimientos `RESERVA`, `COMPRA` y `LIBERACION` (10.000); una compra sin contraparte queda `ABIERTA` con 450.000 reservados, y una sin saldo suficiente queda `RECHAZADA` con "Saldo insuficiente: tienes 9.010.000 COP disponibles...". Por la API se comprueba que el creador cobró los 540.000 que pagó el comprador (HU-06), con sus movimientos `VENTA`. Al final renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve. Detén tus servicios antes (usa los puertos 8080 a 8084) y ten Docker abierto:
 
 ```bash
 ./mvnw -B verify
 bash scripts/prueba-integracion.sh
 ```
 
-Debe terminar con `OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, las órdenes quedaron guardadas, viajaron por Kafka y el motor las ejecutó`. Los logs quedan en `target/integracion/`.
+Debe terminar con `OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, el creador de mercado recibió sus acciones, las órdenes quedaron guardadas, reservaron su saldo o sus acciones, viajaron por Kafka, el motor las ejecutó y portfolio-service liquidó al comprador y al vendedor`. Los logs quedan en `target/integracion/`.
 
 GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba de integración en cada push y pull request a `main`.
 
@@ -389,10 +406,10 @@ GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba d
 
 - **Instantáneas del libro (RNF-13):** los libros viven en memoria y se pierden al reiniciar el motor. Publicarlos en `orderbook.snapshots` (compactado) y reconstruirlos al arrancar desde la última instantánea y los comandos posteriores.
 - **Cancelar una orden (HU-08):** el motor ya cancela y publica `CANCELADA`; falta el endpoint en order-service que envía el comando CANCELAR.
-- **Ventas con reserva de acciones (HU-06, RF-17, RF-30):** la saga ya existe; falta que portfolio-service reserve las acciones de cada venta (hoy la acepta sin reservar) y liquide al vendedor: el dinero entra a su disponible y las acciones salen de su posición. Depende de que alguien tenga acciones (RF-59).
-- **Ver mi portafolio (HU-11, RF-32):** la tabla POSICION ya se llena con cada compra; falta el endpoint con el valor actual y la ganancia o pérdida.
+- **Ver mi portafolio (HU-11, RF-32):** la tabla POSICION ya se mantiene con cada compra, venta y emisión; falta el endpoint con el valor actual y la ganancia o pérdida.
+- **Bots de mercado (HU-24):** el creador de mercado ya existe y tiene las acciones emitidas; falta bot-service, que pone sus órdenes de compra y venta según una estrategia.
+- **Autocruce (RF-27):** hoy una orden puede cruzarse con otra del mismo usuario; el motor debe cancelar la entrante.
 - **Banda de ±10 % de las órdenes a mercado (RF-26, HU-07):** hoy una orden a mercado se ejecuta contra lo que haya; falta limitarla al ±10 % del último precio. Una compra a mercado ya reserva el 10 % de más; si se ejecuta por encima, portfolio-service cobra la diferencia del disponible, y si no alcanza deja un ERROR en el log.
-- **Outbox en auth-service y market-data-service:** order-service ya lo usa. En auth-service, si Kafka está caído justo después de registrar a alguien, el evento se pierde. Con los instrumentos el daño es menor, porque market-data-service vuelve a publicar todo el catálogo cada vez que arranca.
-- **Acciones del bot creador de mercado (RF-59):** `instruments.events` ya lleva las acciones emitidas; falta que portfolio-service se las asigne al bot al crear el instrumento (con bot-service, HU-24).
+- **Outbox en auth-service y market-data-service:** order-service y portfolio-service ya lo usan. En auth-service, si Kafka está caído justo después de registrar a alguien, el evento se pierde (el del creador de mercado no, porque se vuelve a publicar en cada arranque). Con los instrumentos el daño es menor, porque market-data-service vuelve a publicar todo el catálogo cada vez que arranca.
 - **Mercado abierto (RF-16, HU-23):** order-service valida el tick y la banda; falta rechazar órdenes con el mercado cerrado, que llega con `market.status`. Hasta entonces el mercado está siempre abierto.
 - **Límite de órdenes (RNF-24):** 20 órdenes por segundo por usuario en el gateway; el exceso recibe 429.

@@ -16,7 +16,7 @@ public record MovimientoResponse(
         TipoMovimiento tipo,
         long monto,
         String simbolo,
-        Integer cantidad,
+        Long cantidad,
         UUID referenciaId,
         Instant creadoEn) {
 

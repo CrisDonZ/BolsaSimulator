@@ -8,8 +8,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import co.bolsasim.eventos.EjecucionOrden;
+import co.bolsasim.eventos.EstadoInstrumento;
 import co.bolsasim.eventos.EstadoOrden;
 import co.bolsasim.eventos.EventoOrden;
+import co.bolsasim.eventos.InstrumentoActualizado;
 import co.bolsasim.eventos.Lado;
 import co.bolsasim.eventos.SolicitudReserva;
 import co.bolsasim.eventos.TipoOrden;
@@ -154,6 +156,33 @@ class CuentaIntegracionTest {
                 .andExpect(jsonPath("$.movimientos[?(@.tipo == 'COMPRA')].monto").value(-490_000))
                 .andExpect(jsonPath("$.movimientos[?(@.tipo == 'COMPRA')].cantidad").value(100))
                 .andExpect(jsonPath("$.movimientos[?(@.tipo == 'LIBERACION')].monto").value(10_000));
+    }
+
+    @Test
+    void elInstrumentoQueLlegaAntesQueElCreadorDeMercadoLeLlegaCuandoSeRegistra() throws Exception {
+        // instruments.events primero: la emisión queda pendiente
+        kafkaTemplate.send(Topicos.INSTRUMENTS_EVENTS, "KAFK", new InstrumentoActualizado("KAFK", "Kafka S.A.",
+                "Pruebas", 5_000, 10, 2_000, EstadoInstrumento.ACTIVO, Instant.now()));
+        await().atMost(Duration.ofSeconds(30)).until(() -> jdbc.sql(
+                "SELECT count(*) FROM emision WHERE simbolo = 'KAFK'").query(Integer.class).single() == 1);
+
+        // Después el users.registered del creador, como lo publica auth-service, dos veces (cada arranque)
+        UUID creador = UUID.randomUUID();
+        UsuarioRegistrado evento = UsuarioRegistrado.delCreadorDeMercado(creador, "creador_mercado", Instant.now());
+        kafkaTemplate.send(Topicos.USERS_REGISTERED, creador.toString(), evento);
+        kafkaTemplate.send(Topicos.USERS_REGISTERED, creador.toString(), evento);
+        await().atMost(Duration.ofSeconds(30)).until(() -> jdbc.sql(
+                "SELECT estado FROM emision WHERE simbolo = 'KAFK'").query(String.class).single().equals("APLICADA"));
+
+        assertThat(jdbc.sql("""
+                        SELECT p.cantidad FROM posicion p JOIN cuenta c ON c.id = p.cuenta_id
+                        WHERE c.usuario_id = :id AND c.creador_mercado AND c.rol = 'BOT' AND p.simbolo = 'KAFK'""")
+                .param("id", creador).query(Long.class).single()).isEqualTo(2_000);
+        mvc.perform(get("/api/cuenta/movimientos?tipo=EMISION")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + TokensDePrueba.de(creador, "BOT")))
+                .andExpect(jsonPath("$.movimientos.length()").value(1))
+                .andExpect(jsonPath("$.movimientos[0].monto").value(0))
+                .andExpect(jsonPath("$.movimientos[0].cantidad").value(2_000));
     }
 
     @Test
