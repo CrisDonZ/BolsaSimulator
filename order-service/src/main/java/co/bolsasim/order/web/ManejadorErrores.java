@@ -6,6 +6,7 @@ import co.bolsasim.order.servicio.ConsultaInvalidaException;
 import co.bolsasim.order.servicio.InstrumentoNoDisponibleException;
 import co.bolsasim.order.servicio.OrdenInvalidaException;
 import co.bolsasim.order.servicio.OrdenNoEncontradaException;
+import co.bolsasim.order.servicio.PrecioInvalidoException;
 import co.bolsasim.order.servicio.UsuarioNoRegistradoException;
 import java.util.stream.Collectors;
 import org.springframework.http.HttpStatus;
@@ -53,6 +54,14 @@ public class ManejadorErrores {
     public ProblemDetail instrumentoNoDisponible(InstrumentoNoDisponibleException e) {
         ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
         problema.setTitle("Instrumento no disponible");
+        return problema;
+    }
+
+    /** 422: el precio es un número válido, pero no se puede negociar a ese precio (RF-16). */
+    @ExceptionHandler(PrecioInvalidoException.class)
+    public ProblemDetail precioInvalido(PrecioInvalidoException e) {
+        ProblemDetail problema = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
+        problema.setTitle("Precio no válido");
         return problema;
     }
 

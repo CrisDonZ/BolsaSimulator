@@ -1,6 +1,7 @@
 package co.bolsasim.order;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -14,6 +15,10 @@ import co.bolsasim.eventos.EstadoInstrumento;
 import co.bolsasim.eventos.EstadoOrden;
 import co.bolsasim.eventos.EventoOrden;
 import co.bolsasim.eventos.InstrumentoActualizado;
+import co.bolsasim.eventos.OperacionEjecutada;
+import co.bolsasim.eventos.ReservaProcesada;
+import co.bolsasim.eventos.ResultadoReserva;
+import co.bolsasim.eventos.SolicitudReserva;
 import co.bolsasim.eventos.Topicos;
 import co.bolsasim.eventos.UsuarioRegistrado;
 import co.bolsasim.order.instrumento.RepositorioInstrumentos;
@@ -51,9 +56,11 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 /**
  * Prueba de integración: order-service completo contra PostgreSQL y Kafka reales en contenedores (RNF-36).
  * Publica un UsuarioRegistrado como lo haría auth-service y comprueba que, cuando llega a la copia
- * local, ese usuario puede enviar órdenes con su token y que el comando que llega a orders.commands
- * va a su nombre. También publica instrumentos como market-data-service y comprueba que uno suspendido
- * rechaza órdenes sin reiniciar nada. Los tokens se firman con la clave de {@link TokensDePrueba}.
+ * local, ese usuario puede enviar órdenes con su token: cada orden pide su reserva en orders.requested y, cuando
+ * portfolio-service la acepta (reservations.events), su comando llega a orders.commands a su nombre; si la rechaza,
+ * la orden queda RECHAZADA. También publica instrumentos como market-data-service y operaciones como el motor, y
+ * comprueba que uno suspendido rechaza órdenes y que el último precio mueve la banda sin reiniciar nada. Los
+ * tokens se firman con la clave de {@link TokensDePrueba}.
  *
  * <p>Necesita Docker. Si Docker está cerrado, la prueba se salta en vez de fallar.
  */
@@ -128,13 +135,67 @@ class ValidacionUsuarioIntegracionTest {
         consultar("/api/ordenes/" + ordenId, otro).andExpect(status().isNotFound());
         consultar("/api/ordenes", otro).andExpect(jsonPath("$.ordenes").isEmpty());
 
-        // El comando sale del outbox una sola vez, igual que antes: misma clave (símbolo), mismo header de tipo
-        // con el que el motor lo lee, y a nombre del "sub" del token
-        ConsumerRecord<String, String> comando = comandoPublicado(ordenId);
+        // Primero sale la solicitud de reserva, una sola vez: clave = usuario, para portfolio-service
+        ConsumerRecord<String, String> solicitud = publicadoUnaVez(Topicos.ORDERS_REQUESTED, ordenId);
+        assertThat(solicitud.key()).isEqualTo(usuarioId.toString());
+        assertThat(new String(solicitud.headers().lastHeader("__TypeId__").value(), StandardCharsets.UTF_8))
+                .isEqualTo(SolicitudReserva.class.getName());
+        assertThat(solicitud.value()).contains("\"usuarioId\":\"" + usuarioId + "\"", "\"ultimoPrecio\":5000");
+
+        // portfolio-service acepta la reserva (dos veces, como si Kafka la entregara repetida): el comando sale del
+        // outbox una sola vez, igual que antes: misma clave (símbolo), mismo header de tipo con el que el motor lo
+        // lee, y a nombre del "sub" del token
+        ReservaProcesada aceptada = new ReservaProcesada(UUID.randomUUID(), UUID.fromString(ordenId),
+                usuarioId.toString(), ResultadoReserva.ACEPTADA, 500_000, null, Instant.now());
+        kafkaTemplate.send(Topicos.RESERVATIONS_EVENTS, usuarioId.toString(), aceptada);
+        kafkaTemplate.send(Topicos.RESERVATIONS_EVENTS, usuarioId.toString(), aceptada);
+        ConsumerRecord<String, String> comando = publicadoUnaVez(Topicos.ORDERS_COMMANDS, ordenId);
         assertThat(comando.key()).isEqualTo("ANDX");
         assertThat(new String(comando.headers().lastHeader("__TypeId__").value(), StandardCharsets.UTF_8))
                 .isEqualTo(ComandoOrden.class.getName());
         assertThat(comando.value()).contains("\"usuarioId\":\"" + usuarioId + "\"", "\"accion\":\"NUEVA\"");
+    }
+
+    @Test
+    void siPortfolioServiceRechazaLaReservaLaOrdenQuedaRechazadaConElMotivoYNoVaAlMotor() throws Exception {
+        publicarInstrumento("ANDX", EstadoInstrumento.ACTIVO);
+        UUID usuarioId = registrar();
+        String ordenId = enviarOrden(ORDEN, usuarioId)
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString()
+                .replaceAll(".*\"ordenId\":\"([^\"]+)\".*", "$1");
+
+        String motivo = "Saldo insuficiente: tienes 1.000 COP disponibles y la orden necesita 500.000 COP.";
+        kafkaTemplate.send(Topicos.RESERVATIONS_EVENTS, usuarioId.toString(), new ReservaProcesada(UUID.randomUUID(),
+                UUID.fromString(ordenId), usuarioId.toString(), ResultadoReserva.RECHAZADA, 0, motivo, Instant.now()));
+
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> consultar("/api/ordenes/" + ordenId, usuarioId)
+                .andExpect(jsonPath("$.estado").value("RECHAZADA"))
+                .andExpect(jsonPath("$.motivo").value(motivo)));
+        assertThat(publicados(Topicos.ORDERS_COMMANDS, ordenId)).isEmpty();
+    }
+
+    @Test
+    void elPrecioDeLaUltimaOperacionMueveLaBandaDeLasOrdenesNuevas() throws Exception {
+        publicarInstrumento("QUIM", EstadoInstrumento.ACTIVO);
+        UUID usuarioId = registrar();
+        String a6000 = ORDEN.replace("ANDX", "QUIM").replace("5000", "6000");
+
+        // Con el precio inicial (5.000) la banda llega hasta 5.500
+        enviarOrden(a6000, usuarioId).andExpect(status().isUnprocessableContent());
+
+        // El motor publica una operación a 5.500: ahora la banda va de 4.950 a 6.050
+        kafkaTemplate.send(Topicos.TRADES_EXECUTED, "QUIM", new OperacionEjecutada(UUID.randomUUID(), "QUIM", 5_500, 10,
+                UUID.randomUUID(), UUID.randomUUID().toString(), UUID.randomUUID(), UUID.randomUUID().toString(),
+                Instant.now()));
+        await().atMost(Duration.ofSeconds(30)).until(() -> instrumentos.findById("QUIM")
+                .map(instrumento -> Long.valueOf(5_500).equals(instrumento.getUltimoPrecio()))
+                .orElse(false));
+
+        enviarOrden(a6000, usuarioId).andExpect(status().isAccepted());
+        enviarOrden(ORDEN.replace("ANDX", "QUIM").replace("5000", "4900"), usuarioId)
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.detail").value(containsString("entre 4.950 y 6.050")));
     }
 
     @Test
@@ -237,29 +298,46 @@ class ValidacionUsuarioIntegracionTest {
     }
 
     /**
-     * Lee orders.commands desde el principio, como texto, hasta que llega el comando de esa orden o pasan 30
-     * segundos. Llega solo cuando el publicador del outbox lo envía.
+     * Lee el tópico desde el principio, como texto, hasta que llega el mensaje de esa orden o pasan 30 segundos.
+     * Llega solo cuando el publicador del outbox lo envía.
      */
-    private static ConsumerRecord<String, String> comandoPublicado(String ordenId) {
-        List<ConsumerRecord<String, String>> comandos = new CopyOnWriteArrayList<>();
+    private static ConsumerRecord<String, String> publicadoUnaVez(String topico, String ordenId) {
+        List<ConsumerRecord<String, String>> mensajes = new CopyOnWriteArrayList<>();
+        try (var consumidor = consumidor(topico)) {
+            await().atMost(Duration.ofSeconds(30)).until(() -> {
+                leer(consumidor, ordenId, mensajes);
+                return !mensajes.isEmpty();
+            });
+            // Sigue leyendo 2 segundos más (20 rondas del outbox): un mensaje repetido llegaría en ese tiempo
+            long hasta = System.currentTimeMillis() + 2_000;
+            while (System.currentTimeMillis() < hasta) {
+                leer(consumidor, ordenId, mensajes);
+            }
+        }
+        assertThat(mensajes).as("el mensaje de la orden sale una sola vez a %s", topico).hasSize(1);
+        return mensajes.getFirst();
+    }
+
+    /** Los mensajes de esa orden que hay en el tópico después de 2 segundos (20 rondas del outbox). */
+    private static List<ConsumerRecord<String, String>> publicados(String topico, String ordenId) {
+        List<ConsumerRecord<String, String>> mensajes = new CopyOnWriteArrayList<>();
+        try (var consumidor = consumidor(topico)) {
+            long hasta = System.currentTimeMillis() + 2_000;
+            while (System.currentTimeMillis() < hasta) {
+                leer(consumidor, ordenId, mensajes);
+            }
+        }
+        return mensajes;
+    }
+
+    private static KafkaConsumer<String, String> consumidor(String topico) {
         Map<String, Object> configuracion = Map.of(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers(),
                 ConsumerConfig.GROUP_ID_CONFIG, "prueba-" + UUID.randomUUID(),
                 ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        try (var consumidor = new KafkaConsumer<>(configuracion, new StringDeserializer(), new StringDeserializer())) {
-            consumidor.subscribe(List.of(Topicos.ORDERS_COMMANDS));
-            await().atMost(Duration.ofSeconds(30)).until(() -> {
-                leer(consumidor, ordenId, comandos);
-                return !comandos.isEmpty();
-            });
-            // Sigue leyendo 2 segundos más (20 rondas del outbox): un comando repetido llegaría en ese tiempo
-            long hasta = System.currentTimeMillis() + 2_000;
-            while (System.currentTimeMillis() < hasta) {
-                leer(consumidor, ordenId, comandos);
-            }
-        }
-        assertThat(comandos).as("el comando de la orden sale una sola vez").hasSize(1);
-        return comandos.getFirst();
+        var consumidor = new KafkaConsumer<>(configuracion, new StringDeserializer(), new StringDeserializer());
+        consumidor.subscribe(List.of(topico));
+        return consumidor;
     }
 
     private static void leer(KafkaConsumer<String, String> consumidor, String ordenId,

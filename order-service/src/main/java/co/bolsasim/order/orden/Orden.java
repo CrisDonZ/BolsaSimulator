@@ -144,6 +144,33 @@ public class Orden implements Persistable<UUID> {
     }
 
     /**
+     * El comando NUEVA que lleva la orden al motor, cuando portfolio-service aceptó su reserva.
+     *
+     * @throws EventoImposibleException si la orden ya no está PENDIENTE: ya tuvo respuesta de la reserva o del
+     *                                  motor, y enviarla otra vez la duplicaría en el libro
+     */
+    public ComandoOrden comandoParaElMotor() {
+        if (estado != EstadoOrden.PENDIENTE) {
+            throw new EventoImposibleException("la reserva se aceptó, pero la orden ya está " + estado);
+        }
+        return ComandoOrden.paraOrden(id, usuarioId.toString(), simbolo, lado, tipo, precioLimite, cantidad);
+    }
+
+    /**
+     * portfolio-service no pudo reservar el dinero o las acciones (RF-18): la orden termina sin llegar al motor.
+     *
+     * @throws EventoImposibleException si la orden ya no está PENDIENTE: el motor ya la tiene
+     */
+    public void rechazar(String nuevoMotivo, Instant ahora) {
+        if (estado != EstadoOrden.PENDIENTE) {
+            throw new EventoImposibleException("la reserva se rechazó, pero la orden ya está " + estado);
+        }
+        this.estado = EstadoOrden.RECHAZADA;
+        this.motivo = nuevoMotivo;
+        this.actualizadaEn = ahora;
+    }
+
+    /**
      * Si otra solicitud con la misma clave pide exactamente esta orden. El símbolo ya viene en mayúsculas:
      * "andx" y "ANDX" son la misma orden.
      */

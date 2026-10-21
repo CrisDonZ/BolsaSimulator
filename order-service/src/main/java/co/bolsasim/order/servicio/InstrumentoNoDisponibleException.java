@@ -1,6 +1,9 @@
 package co.bolsasim.order.servicio;
 
-/** El símbolo de la orden no está en la copia local de instrumentos, o está suspendido (RF-16, RF-29). */
+/**
+ * El símbolo de la orden no está en la copia local de instrumentos, está suspendido o todavía no tiene precio de
+ * referencia (RF-16, RF-29).
+ */
 public class InstrumentoNoDisponibleException extends RuntimeException {
 
     private static final long serialVersionUID = 1L;
@@ -16,5 +19,11 @@ public class InstrumentoNoDisponibleException extends RuntimeException {
     public static InstrumentoNoDisponibleException suspendido(String simbolo) {
         return new InstrumentoNoDisponibleException(
                 "El instrumento " + simbolo + " está suspendido: no recibe órdenes nuevas.");
+    }
+
+    /** Solo pasa con una copia de antes de V7, hasta que market-data-service vuelva a publicar el instrumento. */
+    public static InstrumentoNoDisponibleException sinPrecio(String simbolo) {
+        return new InstrumentoNoDisponibleException("El instrumento " + simbolo + " todavía no tiene precio de "
+                + "referencia: intenta de nuevo en unos segundos.");
     }
 }

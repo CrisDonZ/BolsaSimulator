@@ -5,7 +5,8 @@ import java.util.UUID;
 
 /**
  * Evento que el motor publica en {@link Topicos#ORDERS_EVENTS} cada vez que una orden cambia: entra al libro,
- * se ejecuta una parte o toda, o se cancela (RF-28). Lo consume order-service, y después portfolio-service y
+ * se ejecuta una parte o toda, o se cancela (RF-28). Lo consumen order-service, que actualiza la orden, y
+ * portfolio-service, que liquida cada ejecución y libera la reserva sobrante (RF-30, RF-31); después lo consumirá
  * notification-service.
  *
  * <p>Lleva el estado completo de la orden después del cambio, así quien lo lee no tiene que reconstruir nada.

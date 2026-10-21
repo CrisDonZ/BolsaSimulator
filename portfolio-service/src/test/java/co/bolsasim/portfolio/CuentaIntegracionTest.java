@@ -7,6 +7,12 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import co.bolsasim.eventos.EjecucionOrden;
+import co.bolsasim.eventos.EstadoOrden;
+import co.bolsasim.eventos.EventoOrden;
+import co.bolsasim.eventos.Lado;
+import co.bolsasim.eventos.SolicitudReserva;
+import co.bolsasim.eventos.TipoOrden;
 import co.bolsasim.eventos.Topicos;
 import co.bolsasim.eventos.UsuarioRegistrado;
 import co.bolsasim.portfolio.servicio.ServicioCuentas;
@@ -14,12 +20,18 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -40,16 +52,17 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * Prueba de integración: portfolio-service completo contra PostgreSQL y Kafka reales en contenedores (RNF-36).
- * Publica users.registered como auth-service y consulta la cuenta con tokens firmados con la clave de
+ * Publica users.registered como auth-service, orders.requested como order-service y orders.events como el motor,
+ * lee las respuestas en reservations.events y consulta la cuenta con tokens firmados con la clave de
  * {@link TokensDePrueba}.
  *
  * <p>Necesita Docker. Si Docker está cerrado, la prueba se salta en vez de fallar.
  */
-// portfolio-service solo consume de Kafka: la prueba publica users.registered en JSON, como auth-service
-@SpringBootTest(properties = "spring.kafka.producer.value-serializer=org.springframework.kafka.support.serializer.JacksonJsonSerializer")
+@SpringBootTest
 @AutoConfigureMockMvc
 @Testcontainers(disabledWithoutDocker = true)
-// Cierra el contexto al terminar: si no, el consumidor de Kafka sigue buscando un Kafka que ya se apagó
+// Cierra el contexto al terminar: si no, el consumidor de Kafka y el publicador del outbox siguen buscando un
+// Kafka y un PostgreSQL que ya se apagaron
 @DirtiesContext
 class CuentaIntegracionTest {
 
@@ -101,6 +114,58 @@ class CuentaIntegracionTest {
                 .andExpect(jsonPath("$.movimientos.length()").value(1))
                 .andExpect(jsonPath("$.movimientos[0].tipo").value("SALDO_INICIAL"))
                 .andExpect(jsonPath("$.movimientos[0].monto").value(10_000_000));
+    }
+
+    @Test
+    void laCompraDeHu05ReservaPorKafkaYAlEjecutarseA4900SePaganYSeLiberanLos10000() throws Exception {
+        UUID ana = UUID.randomUUID();
+        UUID ordenId = UUID.randomUUID();
+        String token = "Bearer " + TokensDePrueba.de(ana, "INVERSIONISTA");
+
+        // order-service pide la reserva de una compra límite de 100 a 5.000; la solicitud llega dos veces
+        SolicitudReserva solicitud = new SolicitudReserva(UUID.randomUUID(), ordenId, ana.toString(), "ANDX",
+                Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100, 5_000, Instant.now());
+        kafkaTemplate.send(Topicos.ORDERS_REQUESTED, ana.toString(), solicitud);
+        kafkaTemplate.send(Topicos.ORDERS_REQUESTED, ana.toString(), solicitud);
+
+        // La respuesta sale una sola vez por reservations.events, con el usuario como clave
+        ConsumerRecord<String, String> respuesta = respuestaPublicada(ordenId);
+        assertThat(respuesta.key()).isEqualTo(ana.toString());
+        assertThat(respuesta.value()).contains("\"resultado\":\"ACEPTADA\"", "\"montoReservado\":500000");
+        mvc.perform(get("/api/cuenta").header(HttpHeaders.AUTHORIZATION, token))
+                .andExpect(jsonPath("$.saldoDisponible").value(9_500_000))
+                .andExpect(jsonPath("$.saldoReservado").value(500_000))
+                .andExpect(jsonPath("$.saldoTotal").value(10_000_000));
+
+        // El motor la cruza con una venta de 100 a 4.900 (el evento llega repetido)
+        EventoOrden ejecutada = new EventoOrden(UUID.randomUUID(), ordenId, ana.toString(), "ANDX",
+                EstadoOrden.EJECUTADA, 100, 100, new EjecucionOrden(UUID.randomUUID(), 4_900, 100), null, Instant.now());
+        kafkaTemplate.send(Topicos.ORDERS_EVENTS, "ANDX", ejecutada);
+        kafkaTemplate.send(Topicos.ORDERS_EVENTS, "ANDX", ejecutada);
+        await().atMost(Duration.ofSeconds(30)).until(() -> procesado(ejecutada.eventoId()));
+
+        mvc.perform(get("/api/cuenta").header(HttpHeaders.AUTHORIZATION, token))
+                .andExpect(jsonPath("$.saldoDisponible").value(9_510_000))
+                .andExpect(jsonPath("$.saldoReservado").value(0))
+                .andExpect(jsonPath("$.saldoTotal").value(9_510_000));
+        mvc.perform(get("/api/cuenta/movimientos").header(HttpHeaders.AUTHORIZATION, token))
+                .andExpect(jsonPath("$.movimientos.length()").value(4))
+                .andExpect(jsonPath("$.movimientos[?(@.tipo == 'RESERVA')].monto").value(-500_000))
+                .andExpect(jsonPath("$.movimientos[?(@.tipo == 'COMPRA')].monto").value(-490_000))
+                .andExpect(jsonPath("$.movimientos[?(@.tipo == 'COMPRA')].cantidad").value(100))
+                .andExpect(jsonPath("$.movimientos[?(@.tipo == 'LIBERACION')].monto").value(10_000));
+    }
+
+    @Test
+    void sinSaldoLaReservaSeRechazaPorKafkaConElMotivo() {
+        UUID beto = UUID.randomUUID();
+        UUID ordenId = UUID.randomUUID();
+
+        kafkaTemplate.send(Topicos.ORDERS_REQUESTED, beto.toString(), new SolicitudReserva(UUID.randomUUID(), ordenId,
+                beto.toString(), "ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 10_000, 5_000, Instant.now()));
+
+        assertThat(respuestaPublicada(ordenId).value()).contains("\"resultado\":\"RECHAZADA\"",
+                "Saldo insuficiente: tienes 10.000.000 COP disponibles y la orden necesita 50.000.000 COP.");
     }
 
     @Test
@@ -196,6 +261,40 @@ class CuentaIntegracionTest {
                         SELECT count(*) FROM movimiento m JOIN cuenta c ON c.id = m.cuenta_id
                         WHERE c.usuario_id = :id""")
                 .param("id", usuario).query(Integer.class).single();
+    }
+
+    /**
+     * Lee reservations.events desde el principio hasta que llega la respuesta de esa orden, y 2 segundos más (20
+     * rondas del outbox): una respuesta repetida llegaría en ese tiempo.
+     */
+    private static ConsumerRecord<String, String> respuestaPublicada(UUID ordenId) {
+        List<ConsumerRecord<String, String>> respuestas = new CopyOnWriteArrayList<>();
+        Map<String, Object> configuracion = Map.of(
+                ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers(),
+                ConsumerConfig.GROUP_ID_CONFIG, "prueba-" + UUID.randomUUID(),
+                ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        try (var consumidor = new KafkaConsumer<>(configuracion, new StringDeserializer(), new StringDeserializer())) {
+            consumidor.subscribe(List.of(Topicos.RESERVATIONS_EVENTS));
+            await().atMost(Duration.ofSeconds(30)).until(() -> {
+                leer(consumidor, ordenId, respuestas);
+                return !respuestas.isEmpty();
+            });
+            long hasta = System.currentTimeMillis() + 2_000;
+            while (System.currentTimeMillis() < hasta) {
+                leer(consumidor, ordenId, respuestas);
+            }
+        }
+        assertThat(respuestas).as("la respuesta de la reserva sale una sola vez").hasSize(1);
+        return respuestas.getFirst();
+    }
+
+    private static void leer(KafkaConsumer<String, String> consumidor, UUID ordenId,
+                             List<ConsumerRecord<String, String>> respuestas) {
+        consumidor.poll(Duration.ofMillis(200)).forEach(mensaje -> {
+            if (mensaje.value().contains("\"ordenId\":\"" + ordenId + "\"")) {
+                respuestas.add(mensaje);
+            }
+        });
     }
 
     private boolean procesado(UUID eventoId) {

@@ -1,6 +1,7 @@
 package co.bolsasim.order.servicio;
 
 import co.bolsasim.eventos.ComandoOrden;
+import co.bolsasim.eventos.SolicitudReserva;
 import co.bolsasim.eventos.TipoOrden;
 import co.bolsasim.eventos.Topicos;
 import co.bolsasim.order.instrumento.Instrumento;
@@ -28,8 +29,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * Reglas de negocio de las órdenes. No sabe nada de Kafka: guarda la orden y deja su comando en el outbox,
- * en la misma transacción; {@link co.bolsasim.order.outbox.PublicadorOutbox} lo lleva al motor después.
+ * Reglas de negocio de las órdenes. No sabe nada de Kafka: guarda la orden y deja su solicitud de reserva en el
+ * outbox, en la misma transacción; {@link co.bolsasim.order.outbox.PublicadorOutbox} la lleva a portfolio-service
+ * después. Cuando la reserva se acepta, {@link ServicioReservas} envía la orden al motor.
  */
 @Service
 public class ServicioOrdenes {
@@ -67,8 +69,8 @@ public class ServicioOrdenes {
     }
 
     /**
-     * Guarda la orden PENDIENTE y su comando NUEVA en el outbox, en la misma transacción (RNF-12): si Kafka
-     * está caído, la orden igual queda y su comando sale cuando Kafka vuelva. Si una validación falla, no se
+     * Guarda la orden PENDIENTE y su solicitud de reserva en el outbox, en la misma transacción (RNF-12): si Kafka
+     * está caído, la orden igual queda y su solicitud sale cuando Kafka vuelva. Si una validación falla, no se
      * guarda nada: nunca llegó a ser una orden, y la clave queda libre para reenviarla corregida.
      *
      * <p>Si la misma solicitud ya llegó con esa clave, devuelve la orden original sin crear nada (HU-10). Se
@@ -104,7 +106,10 @@ public class ServicioOrdenes {
 
     private OrdenCreada nueva(UUID usuario, String clave, CrearOrdenRequest request) {
         validarUsuario(usuario);
-        validarInstrumento(request.simbolo().toUpperCase(Locale.ROOT));
+        Instrumento instrumento = validarInstrumento(request.simbolo().toUpperCase(Locale.ROOT));
+        // RF-16 también pide el mercado abierto: con HU-23 (abrir y cerrar el mercado) se valida aquí. Hasta
+        // entonces el mercado está siempre abierto
+        long precioDeReferencia = validarPrecioLimite(request, instrumento);
 
         ComandoOrden comando = ComandoOrden.nueva(
                 usuario.toString(),
@@ -115,12 +120,13 @@ public class ServicioOrdenes {
                 request.cantidad());
 
         // saveAndFlush: el INSERT va antes que el outbox, así el choque con otra solicitud de la misma clave
-        // se resuelve aquí, antes de escribir el comando
+        // se resuelve aquí, antes de escribir la solicitud
         Orden orden = ordenes.saveAndFlush(
                 Orden.nueva(comando, usuario, clave, Instant.now().truncatedTo(ChronoUnit.MICROS)));
-        // La clave del mensaje es el símbolo, como antes: el motor recibe las órdenes de ANDX en el orden en que
-        // llegaron
-        outbox.guardar(Topicos.ORDERS_COMMANDS, comando.simbolo(), comando);
+        // La clave del mensaje es el usuario: portfolio-service procesa sus solicitudes una tras otra, así dos
+        // órdenes a la vez no gastan el mismo saldo
+        outbox.guardar(Topicos.ORDERS_REQUESTED, usuario.toString(),
+                SolicitudReserva.de(comando, precioDeReferencia));
         return new OrdenCreada(orden, false);
     }
 
@@ -239,17 +245,51 @@ public class ServicioOrdenes {
      * El instrumento debe estar en la copia local que llena instruments.events y estar activo. Uno
      * suspendido rechaza órdenes nuevas; las cancelaciones, cuando existan (HU-08), sí pasarán (RF-29).
      */
-    private void validarInstrumento(String simbolo) {
+    private Instrumento validarInstrumento(String simbolo) {
         Instrumento instrumento = instrumentos.findById(simbolo)
                 .orElseThrow(() -> InstrumentoNoDisponibleException.noExiste(simbolo));
         if (!instrumento.activo()) {
             throw InstrumentoNoDisponibleException.suspendido(simbolo);
         }
+        return instrumento;
     }
 
-    // Próximos pasos (ver requisitos RF-16 y RF-17): validar tick, banda de ±10 %,
-    // mercado abierto, y pedir la reserva de fondos a portfolio-service.
-    private void validarPrecio(CrearOrdenRequest request) {
+    /**
+     * RF-16: el precio de una orden LIMITE es múltiplo del tick y está a ±10 % del precio de referencia, el de la
+     * última operación o, si todavía no hay ninguna, el precio inicial. Los límites cuentan: con referencia 5.000,
+     * 4.500 y 5.500 pasan. Con enteros y sin redondeos: el mínimo es 90 % de la referencia redondeado hacia arriba
+     * y el máximo, 110 % redondeado hacia abajo.
+     *
+     * @return el precio de referencia, que también va en la solicitud de reserva (una compra a mercado se reserva
+     *         con él)
+     */
+    private static long validarPrecioLimite(CrearOrdenRequest request, Instrumento instrumento) {
+        String simbolo = instrumento.getSimbolo();
+        long referencia = instrumento.precioDeReferencia()
+                .orElseThrow(() -> InstrumentoNoDisponibleException.sinPrecio(simbolo));
+        if (request.tipo() == TipoOrden.MERCADO) {
+            return referencia;
+        }
+
+        long precio = request.precioLimite();
+        long tick = instrumento.getTick();
+        if (precio % tick != 0) {
+            long abajo = precio - precio % tick;
+            throw new PrecioInvalidoException("El precio " + Pesos.formato(precio) + " no es múltiplo del tick de "
+                    + simbolo + " (" + Pesos.formato(tick) + " COP): usa, por ejemplo, " + Pesos.formato(abajo)
+                    + " o " + Pesos.formato(abajo + tick) + ".");
+        }
+        long minimo = (referencia * 9 + 9) / 10;
+        long maximo = referencia * 11 / 10;
+        if (precio < minimo || precio > maximo) {
+            throw new PrecioInvalidoException("El precio " + Pesos.formato(precio) + " está a más de 10 % del último "
+                    + "precio de " + simbolo + " (" + Pesos.formato(referencia) + " COP): debe estar entre "
+                    + Pesos.formato(minimo) + " y " + Pesos.formato(maximo) + ".");
+        }
+        return referencia;
+    }
+
+    private static void validarPrecio(CrearOrdenRequest request) {
         if (request.tipo() == TipoOrden.LIMITE && request.precioLimite() == null) {
             throw new OrdenInvalidaException("Una orden LIMITE necesita precioLimite.");
         }

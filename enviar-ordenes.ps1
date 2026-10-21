@@ -3,11 +3,13 @@
 # con el token de acceso. Las órdenes no llevan el id del usuario: order-service lo toma del token.
 # Cada orden lleva su propia Idempotency-Key, así cada envío es una orden distinta.
 # Los símbolos deben ser de instrumentos activos: los 10 iniciales (ANDX, CAFE, BGUA, TAYR, QUIM, FLOR, COLB,
-# ARRA, SALV, PACF) o los que cree el ADMIN. Uno que no existe o está suspendido se rechaza con el motivo.
+# ARRA, SALV, PACF) o los que cree el ADMIN. Uno que no existe o está suspendido se rechaza con el motivo, y
+# también un precio que no es múltiplo del tick o está a más de 10 % del último precio: CAFE empieza en 12000.
+# Cada compra reserva su dinero antes de ir al motor; sin saldo suficiente, queda RECHAZADA (míralo en GET /api/ordenes).
 #
 #   $yo = @{ Correo = "cris@correo.com"; Contrasena = "secreta123" }
-#   .\enviar-ordenes.ps1 @yo                                             -> 3 compras de ANDX y 3 de CAFE a 5000
-#   .\enviar-ordenes.ps1 @yo -Simbolos ANDX                              -> 3 compras solo de ANDX
+#   .\enviar-ordenes.ps1 @yo                                             -> 3 compras de ANDX a 5000
+#   .\enviar-ordenes.ps1 @yo -Simbolos CAFE -Precio 12000                -> 3 compras de CAFE a 12000
 #   .\enviar-ordenes.ps1 @yo -Simbolos ANDX -Lado VENTA                  -> 3 ventas de ANDX a 5000
 #   .\enviar-ordenes.ps1 @yo -Simbolos ANDX -Lado VENTA -Precio 4900 -Cantidad 50 -Veces 1
 #   .\enviar-ordenes.ps1 @yo -Simbolos ANDX -Tipo MERCADO -Cantidad 80 -Veces 1
@@ -17,7 +19,7 @@ param(
     [string] $Correo,
     [Parameter(Mandatory = $true, HelpMessage = "tu contraseña")]
     [string] $Contrasena,
-    [string[]] $Simbolos = @("ANDX", "CAFE"),
+    [string[]] $Simbolos = @("ANDX"),
     [int] $Veces = 3,
     [ValidateSet("COMPRA", "VENTA")] [string] $Lado = "COMPRA",
     [ValidateSet("LIMITE", "MERCADO")] [string] $Tipo = "LIMITE",
@@ -75,8 +77,8 @@ foreach ($simbolo in $Simbolos) {
                 -ContentType "application/json" -Body ($orden | ConvertTo-Json)
             Write-Host "$Lado $Cantidad $simbolo $detalle #$i -> $($respuesta.mensaje)"
         } catch {
-            # Por ejemplo, 401 si el token venció, o 422 si el usuario no está registrado o el instrumento
-            # no existe o está suspendido
+            # Por ejemplo, 401 si el token venció, o 422 si el usuario no está registrado, el instrumento
+            # no existe o está suspendido, o el precio no respeta el tick o la banda de ±10 %
             $motivo = Get-MotivoRechazo $_
             Write-Host "$Lado $Cantidad $simbolo $detalle #$i -> RECHAZADA: $motivo" -ForegroundColor Red
             exit 1

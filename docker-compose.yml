@@ -59,6 +59,12 @@ services:
           --topic users.registered --partitions 6 --replication-factor 1 --config retention.ms=-1
         /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:19092 --alter --entity-type topics \
           --entity-name users.registered --add-config retention.ms=-1
+        # La saga de la reserva entre order-service y portfolio-service (clave = usuario): la solicitud de cada
+        # orden nueva y su respuesta, aceptada o rechazada
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \
+          --topic orders.requested --partitions 6 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \
+          --topic reservations.events --partitions 6 --replication-factor 1
         # Lo que publica el motor: cambios de estado de las órdenes y operaciones (clave = símbolo).
         # Guardan 7 días de mensajes, el valor por defecto (RNF-15)
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \

@@ -29,12 +29,12 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * Prueba de integración del historial de movimientos contra PostgreSQL real (RNF-36): filtros por tipo y por
- * fechas, paginación por cursor, y EXPLAIN de cada consulta con 20.000 movimientos. Por ahora el único
- * movimiento real es SALDO_INICIAL: los demás se insertan como datos de prueba. Kafka no hace falta.
+ * fechas, paginación por cursor, y EXPLAIN de cada consulta con 20.000 movimientos. Salvo SALDO_INICIAL, los
+ * movimientos se insertan como datos de prueba. Kafka no hace falta.
  *
  * <p>Necesita Docker. Si Docker está cerrado, la prueba se salta en vez de fallar.
  */
-@SpringBootTest(properties = "spring.kafka.listener.auto-startup=false")
+@SpringBootTest(properties = {"spring.kafka.listener.auto-startup=false", "bolsasim.outbox.programado=false"})
 @Testcontainers(disabledWithoutDocker = true)
 class MovimientosIntegracionTest {
 

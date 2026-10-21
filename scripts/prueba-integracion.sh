@@ -5,12 +5,15 @@
 # comprueba que el perfil de otro usuario responde 404, que sin token se recibe 401 (también llamando
 # directo a auth-service, order-service y market-data-service, sin el gateway) y que una orden con
 # usuarioId en el cuerpo recibe 400. Después el ADMIN crea un instrumento nuevo con todo corriendo
-# (un inversionista recibe 403), lo suspende (las órdenes reciben 422) y lo reactiva; con el token se
-# envían una venta y una compra de ese instrumento que se cruzan, y se comprueba que sus comandos salen del
-# outbox y que el motor registra la ejecución a nombre del usuario del token; la compra se reenvía con la
-# misma Idempotency-Key y a orders.commands llega un solo comando. Las órdenes se consultan por id
-# y en la lista paginada, y otro usuario recibe 404. Por último renueva el token y comprueba que, después de
-# cerrar sesión, el token de refresco ya no sirve.
+# (un inversionista recibe 403), lo suspende (las órdenes reciben 422) y lo reactiva; un precio fuera del tick
+# o de la banda de ±10 % recibe 422. Con el token se envían una venta y una compra de ese instrumento que se
+# cruzan: cada una pide su reserva a portfolio-service, y se comprueba que sus comandos salen del outbox y que el
+# motor registra la ejecución a nombre del usuario del token; la compra se reenvía con la misma Idempotency-Key y
+# a orders.commands llega un solo comando. Las órdenes se consultan por id y en la lista paginada, y otro usuario
+# recibe 404. Luego, los criterios de HU-05: con una venta de 100 a 4900 en el libro, una compra de 100 a 5000 se
+# ejecuta a 4900 y se liberan los 10.000 sobrantes (saldo, reservado y movimientos cuadran); una compra sin
+# contraparte queda ABIERTA con su dinero reservado, y una sin saldo suficiente queda RECHAZADA con el motivo.
+# Por último renueva el token y comprueba que, después de cerrar sesión, el token de refresco ya no sirve.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
 # (la prueba arranca los suyos en los puertos 8080 a 8084).
@@ -86,6 +89,20 @@ comprobar() {
 # Saca un campo de texto de la última respuesta JSON. Uso: campo NOMBRE
 campo() {
     sed -E "s/.*\"$1\":\"([^\"]+)\".*/\1/" "$LOGS/respuesta.json"
+}
+
+# Consulta una ruta cada segundo hasta que la respuesta tenga el texto (por ejemplo, el estado que le pone el motor
+# o la reserva, que llegan de forma asíncrona); si no aparece en 30 s, la muestra y falla.
+# Uso: esperar_respuesta DESCRIPCIÓN RUTA TOKEN TEXTO
+esperar_respuesta() {
+    for _ in $(seq 1 30); do
+        comprobar "$1" "$(pedir GET "$2" "" "$3")" 200
+        grep -q "$4" "$LOGS/respuesta.json" && return 0
+        sleep 1
+    done
+    echo "$1: la respuesta no llegó a tener $4:"
+    cat "$LOGS/respuesta.json"
+    exit 1
 }
 
 echo "1. Levantando Kafka y PostgreSQL..."
@@ -231,8 +248,13 @@ esperar "Instrumento $SIMBOLO ahora está SUSPENDIDO" "$LOGS/order-service.log" 
 comprobar "Orden de un instrumento suspendido" "$(pedir POST /api/ordenes "$ORDEN" "$TOKEN")" 422
 comprobar "Reactivar $SIMBOLO" "$(pedir POST "/api/instrumentos/$SIMBOLO/reactivar" "" "$TOKEN_ADMIN")" 200
 esperar "Instrumento $SIMBOLO ahora está ACTIVO" "$LOGS/order-service.log" 30
+# RF-16: el tick de $SIMBOLO es 10 y su precio inicial 5000, así que la banda va de 4500 a 5500
+comprobar "Orden con un precio que no es múltiplo del tick" "$(pedir POST /api/ordenes "${ORDEN/5000/5005}" "$TOKEN")" 422
+grep -q "no es múltiplo del tick de $SIMBOLO" "$LOGS/respuesta.json"
+comprobar "Orden a más de 10 % del último precio" "$(pedir POST /api/ordenes "${ORDEN/5000/5510}" "$TOKEN")" 422
+grep -q "debe estar entre 4.500 y 5.500" "$LOGS/respuesta.json"
 echo "   Sin token 401, token alterado 401, usuarioId en el cuerpo 400, instrumento inexistente 422,"
-echo "   suspendido 422 hasta que se reactiva; directo a order-service también 401"
+echo "   suspendido 422 hasta que se reactiva; directo a order-service también 401; fuera del tick o de la banda 422"
 
 echo "7. Enviando con el token una venta y una compra de $SIMBOLO a 5000..."
 comprobar "Venta" "$(pedir POST /api/ordenes "${ORDEN/COMPRA/VENTA}" "$TOKEN")" 202
@@ -248,10 +270,14 @@ OTRA_CANTIDAD=$(echo "$ORDEN" | sed 's/"cantidad":10/"cantidad":11/')
 comprobar "La misma clave con otra orden" "$(CLAVE=$CLAVE_COMPRA pedir POST /api/ordenes "$OTRA_CANTIDAD" "$TOKEN")" 422
 comprobar "Orden sin Idempotency-Key" "$(CLAVE=ninguna pedir POST /api/ordenes "$ORDEN" "$TOKEN")" 400
 
-# El comando sale del outbox; el motor anota el usuario de cada orden: solo puede venir del "sub" del token
+# Cada orden pide primero su reserva (clave = usuario) y portfolio-service responde; con la reserva aceptada, el
+# comando sale del outbox. El motor anota el usuario de cada orden: solo puede venir del "sub" del token
 esperar "Ejecución: 10 acciones de $SIMBOLO a 5000 COP .*($ID)" "$LOGS/matching-engine.log" 30
+esperar "Evento .* del outbox publicado en orders.requested (clave $ID" "$LOGS/order-service.log" 10
+esperar "Evento .* del outbox publicado en reservations.events (clave $ID" "$LOGS/portfolio-service.log" 10
 esperar "Evento .* del outbox publicado en orders.commands (clave $SIMBOLO" "$LOGS/order-service.log" 10
-echo "   Los comandos salieron del outbox y el motor ejecutó las órdenes a nombre del usuario del token"
+echo "   Las reservas se aceptaron, los comandos salieron del outbox y el motor ejecutó las órdenes a nombre del"
+echo "   usuario del token"
 
 # La compra se envió dos veces con la misma clave: a orders.commands debe haber llegado un solo comando
 COMANDOS=$(MSYS_NO_PATHCONV=1 docker exec bolsasim-kafka /opt/kafka/bin/kafka-console-consumer.sh \
@@ -299,7 +325,51 @@ comprobar "La orden de otro usuario" "$(pedir GET "/api/ordenes/$COMPRA" "" "$TO
 comprobar "Consultar órdenes directo a order-service sin token" "$(GATEWAY=$ORDER_SERVICE pedir GET /api/ordenes)" 401
 echo "   Paginación con cursor 200, página de 101 400, orden de otro 404, sin token 401"
 
-echo "8. Renovando el token y cerrando sesión..."
+echo "8. Comprando a precio límite (HU-05)..."
+# La compra de 10 a 5000 del paso 7 ya se pagó: 50.000 menos. La venta todavía no se liquida (llega con HU-06)
+esperar_respuesta "Cuenta después de la compra del paso 7" /api/cuenta "$TOKEN" \
+    '"saldoDisponible":9950000,"saldoReservado":0,"saldoTotal":9950000'
+# El otro usuario deja una venta de 100 a 4900 en el libro
+VENTA_4900="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"VENTA\",\"tipo\":\"LIMITE\",\"precioLimite\":4900,\"cantidad\":100}"
+comprobar "Venta de 100 a 4900 del otro usuario" "$(pedir POST /api/ordenes "$VENTA_4900" "$TOKEN_OTRO")" 202
+VENTA_OTRO=$(campo ordenId)
+esperar_respuesta "Venta del otro usuario en el libro" "/api/ordenes/$VENTA_OTRO" "$TOKEN_OTRO" '"estado":"ABIERTA"'
+# Se reservan 500.000, se ejecuta a 4900 (el precio de la venta que esperaba) y se liberan los 10.000 sobrantes
+COMPRA_5000="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":5000,\"cantidad\":100}"
+comprobar "Compra de 100 a 5000" "$(pedir POST /api/ordenes "$COMPRA_5000" "$TOKEN")" 202
+COMPRA_HU05=$(campo ordenId)
+esperar_respuesta "Compra de 100 a 5000" "/api/ordenes/$COMPRA_HU05" "$TOKEN" \
+    '"cantidadEjecutada":100,"precioPromedio":4900.*"estado":"EJECUTADA"'
+esperar_respuesta "Cuenta después de la compra a 4900" /api/cuenta "$TOKEN" \
+    '"saldoDisponible":9460000,"saldoReservado":0,"saldoTotal":9460000'
+comprobar "Movimientos de la compra" "$(pedir GET "/api/cuenta/movimientos?tamano=3" "" "$TOKEN")" 200
+grep -q "\"tipo\":\"RESERVA\",\"monto\":-500000,\"simbolo\":\"$SIMBOLO\",\"cantidad\":100,\"referenciaId\":\"$COMPRA_HU05\"" \
+    "$LOGS/respuesta.json"
+grep -q "\"tipo\":\"COMPRA\",\"monto\":-490000,\"simbolo\":\"$SIMBOLO\",\"cantidad\":100" "$LOGS/respuesta.json"
+grep -q "\"tipo\":\"LIBERACION\",\"monto\":10000,\"simbolo\":\"$SIMBOLO\",\"cantidad\":null,\"referenciaId\":\"$COMPRA_HU05\"" \
+    "$LOGS/respuesta.json"
+echo "   Venta de 100 a 4900 en el libro: la compra de 100 a 5000 reservó 500.000, se ejecutó a 4900 y liberó"
+echo "   10.000; saldo 9.460.000, reservado 0, movimientos RESERVA, COMPRA y LIBERACION"
+# Sin contraparte: queda ABIERTA con su dinero reservado. La banda ya se movió con la operación a 4900
+COMPRA_ABIERTA="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":4500,\"cantidad\":100}"
+comprobar "Compra de 100 a 4500" "$(pedir POST /api/ordenes "$COMPRA_ABIERTA" "$TOKEN")" 202
+ABIERTA=$(campo ordenId)
+esperar_respuesta "Compra de 100 a 4500 en el libro" "/api/ordenes/$ABIERTA" "$TOKEN" '"estado":"ABIERTA"'
+esperar_respuesta "Cuenta con la compra abierta" /api/cuenta "$TOKEN" \
+    '"saldoDisponible":9010000,"saldoReservado":450000,"saldoTotal":9460000'
+# Sin saldo: 10.000 a 4900 necesitan 49.000.000 y quedan 9.010.000. Responde 202 y la orden queda RECHAZADA
+SIN_SALDO="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":4900,\"cantidad\":10000}"
+comprobar "Compra sin saldo suficiente" "$(pedir POST /api/ordenes "$SIN_SALDO" "$TOKEN")" 202
+RECHAZADA=$(campo ordenId)
+esperar_respuesta "Compra sin saldo" "/api/ordenes/$RECHAZADA" "$TOKEN" '"estado":"RECHAZADA"'
+grep -q '"motivo":"Saldo insuficiente: tienes 9.010.000 COP disponibles y la orden necesita 49.000.000 COP."' \
+    "$LOGS/respuesta.json"
+comprobar "Cuenta después del rechazo" "$(pedir GET /api/cuenta "" "$TOKEN")" 200
+grep -q '"saldoDisponible":9010000,"saldoReservado":450000' "$LOGS/respuesta.json"
+echo "   Compra sin contraparte ABIERTA con 450.000 reservados; sin saldo, RECHAZADA con \"Saldo insuficiente: tienes"
+echo "   9.010.000 COP disponibles\" y la cuenta sin cambios"
+
+echo "9. Renovando el token y cerrando sesión..."
 comprobar "Renovar el token" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200
 comprobar "Cerrar sesión sin token" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 comprobar "Cerrar sesión directo a auth-service sin token" \
@@ -308,4 +378,4 @@ comprobar "Cerrar sesión" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"
 comprobar "Renovar después de cerrar sesión" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 echo "   Refresco 200, logout sin token 401, logout 204 y refresco revocado 401"
 
-echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, las órdenes quedaron guardadas, viajaron por Kafka y el motor las ejecutó. Logs en $LOGS/"
+echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, las órdenes quedaron guardadas, reservaron su saldo, viajaron por Kafka, el motor las ejecutó y portfolio-service las liquidó. Logs en $LOGS/"

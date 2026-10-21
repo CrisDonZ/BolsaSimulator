@@ -34,7 +34,7 @@ spring:
     bootstrap-servers: localhost:9092
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      # Convierte el record ComandoOrden a JSON con Jackson 3
+      # Convierte los records ComandoOrden y SolicitudReserva a JSON con Jackson 3
       value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
       # Kafka confirma el mensaje solo cuando quedó guardado de forma segura
       acks: all
@@ -45,8 +45,9 @@ spring:
         "[request.timeout.ms]": 5000
         "[max.block.ms]": 5000
     consumer:
-      # Lee users.registered (qué usuarios existen), instruments.events (qué instrumentos se negocian) y
-      # orders.events (qué pasó con cada orden en el motor)
+      # Lee users.registered (qué usuarios existen), instruments.events (qué instrumentos se negocian),
+      # trades.executed (el último precio), reservations.events (si portfolio-service reservó el saldo de cada
+      # orden) y orders.events (qué pasó con cada orden en el motor)
       group-id: order-service
       # Si el grupo es nuevo, lee el tópico desde el principio: así conoce a los usuarios ya registrados
       auto-offset-reset: earliest
