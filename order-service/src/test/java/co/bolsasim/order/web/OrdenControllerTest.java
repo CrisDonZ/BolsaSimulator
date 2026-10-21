@@ -14,8 +14,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import co.bolsasim.eventos.AccionComando;
 import co.bolsasim.eventos.ComandoOrden;
 import co.bolsasim.eventos.EstadoInstrumento;
+import co.bolsasim.eventos.EstadoOrden;
 import co.bolsasim.eventos.InstrumentoActualizado;
 import co.bolsasim.eventos.Lado;
 import co.bolsasim.eventos.SolicitudReserva;
@@ -53,6 +55,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
@@ -299,6 +302,64 @@ class OrdenControllerTest {
     }
 
     @Test
+    void cancelarUnaOrdenAbiertaResponde202ConLaOrdenYEnviaElCancelar() throws Exception {
+        Orden abierta = ordenDe(USUARIO);
+        abierta.aplicar(EstadoOrden.ABIERTA, 100, 0, null, null, Instant.now());
+        when(ordenes.solicitarCancelacion(eq(abierta.getId()), eq(UUID.fromString(USUARIO)), any())).thenAnswer(
+                invocacion -> {
+                    ReflectionTestUtils.setField(abierta, "cancelacionSolicitadaEn", invocacion.getArgument(2));
+                    return 1;
+                });
+        when(ordenes.findByIdAndUsuarioId(abierta.getId(), UUID.fromString(USUARIO))).thenReturn(Optional.of(abierta));
+
+        cancelar(abierta.getId(), TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.id").value(abierta.getId().toString()))
+                // Sigue ABIERTA: queda CANCELADA cuando el motor lo confirma
+                .andExpect(jsonPath("$.estado").value("ABIERTA"))
+                .andExpect(jsonPath("$.cancelacionSolicitadaEn").isNotEmpty());
+
+        ArgumentCaptor<Object> comando = ArgumentCaptor.forClass(Object.class);
+        verify(outbox).guardar(eq(Topicos.ORDERS_COMMANDS), eq("ANDX"), comando.capture());
+        assertThat(((ComandoOrden) comando.getValue()).accion()).isEqualTo(AccionComando.CANCELAR);
+    }
+
+    @Test
+    void cancelarUnaOrdenQueNoExisteODeOtroResponde404() throws Exception {
+        cancelar(UUID.randomUUID(), TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.title").value("Orden no encontrada"));
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void cancelarUnaOrdenPendienteOTerminadaResponde409ConElMotivo() throws Exception {
+        Orden pendiente = ordenDe(USUARIO);
+        Orden ejecutada = ordenDe(USUARIO);
+        ejecutada.aplicar(EstadoOrden.EJECUTADA, 100, 100, null, null, Instant.now());
+        when(ordenes.findByIdAndUsuarioId(pendiente.getId(), UUID.fromString(USUARIO))).thenReturn(Optional.of(pendiente));
+        when(ordenes.findByIdAndUsuarioId(ejecutada.getId(), UUID.fromString(USUARIO))).thenReturn(Optional.of(ejecutada));
+
+        cancelar(pendiente.getId(), TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.title").value("Orden no cancelable"))
+                .andExpect(jsonPath("$.detail")
+                        .value("La orden todavía se está procesando; intenta cancelarla en unos segundos."));
+        cancelar(ejecutada.getId(), TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.detail").value("La orden ya terminó (EJECUTADA): no se puede cancelar."));
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void cancelarSinTokenResponde401() throws Exception {
+        cancelar(UUID.randomUUID(), null)
+                .andExpect(status().isUnauthorized())
+                .andExpect(header().string(HttpHeaders.WWW_AUTHENTICATE, "Bearer"));
+        verifyNoInteractions(outbox, ordenes);
+    }
+
+    @Test
     void conUnTokenVencidoResponde401() throws Exception {
         Instant hace20Minutos = Instant.now().minus(Duration.ofMinutes(20));
         String vencido = TokensDePrueba.firmar(TokensDePrueba.CLAVE, TokensDePrueba.EMISOR, USUARIO,
@@ -409,6 +470,14 @@ class OrdenControllerTest {
     private static Instrumento instrumento(String simbolo, EstadoInstrumento estado) {
         return new Instrumento(new InstrumentoActualizado(simbolo, "Andex Energía", "Energía", 5_000, 10, 1_000_000,
                 estado, Instant.now()));
+    }
+
+    private ResultActions cancelar(UUID ordenId, String token) throws Exception {
+        var peticion = post("/api/ordenes/" + ordenId + "/cancelacion");
+        if (token != null) {
+            peticion.header(HttpHeaders.AUTHORIZATION, "Bearer " + token);
+        }
+        return mvc.perform(peticion);
     }
 
     private ResultActions consultar(String ruta, String token) throws Exception {

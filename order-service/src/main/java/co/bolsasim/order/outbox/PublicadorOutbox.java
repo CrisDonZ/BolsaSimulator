@@ -25,6 +25,13 @@ import tools.jackson.databind.json.JsonMapper;
  * solo cuando Kafka los confirma (acks=all). Si Kafka está caído, las filas esperan y salen en la primera
  * ronda después de que vuelva.
  *
+ * <p>El orden es el de la columna secuencia, que nunca empata: con dos filas de la misma marca de tiempo, el
+ * orden por creado_en no decidía cuál salía primero. El productor es idempotente (application.yml), así un
+ * reintento de Kafka tampoco cambia el orden dentro de la partición. La secuencia se asigna al insertar y no al
+ * confirmar: dos transacciones que confirman en otro orden pueden dejar una fila de número menor visible después.
+ * Para la NUEVA y el CANCELAR de una misma orden no pasa, porque solo se cancela una orden que el motor ya puso en
+ * el libro (ver ServicioOrdenes.cancelar).
+ *
  * <p>Si un envío falla, la ronda se detiene ahí y solo se marcan los anteriores: así una orden de ANDX nunca
  * adelanta a otra de ANDX que quedó pendiente (RNF-11).
  *
@@ -90,7 +97,7 @@ public class PublicadorOutbox {
                         SELECT id, topico, clave, tipo_evento, CAST(payload AS text) AS payload
                         FROM outbox
                         WHERE publicado_en IS NULL
-                        ORDER BY creado_en, id
+                        ORDER BY secuencia
                         LIMIT :lote""")
                 .param("lote", LOTE)
                 .query(Pendiente.class)
