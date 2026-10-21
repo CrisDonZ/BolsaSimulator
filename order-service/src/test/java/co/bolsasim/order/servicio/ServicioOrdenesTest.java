@@ -6,15 +6,16 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import co.bolsasim.eventos.AccionComando;
 import co.bolsasim.eventos.ComandoOrden;
 import co.bolsasim.eventos.EstadoInstrumento;
 import co.bolsasim.eventos.InstrumentoActualizado;
 import co.bolsasim.eventos.Lado;
+import co.bolsasim.eventos.SolicitudReserva;
 import co.bolsasim.eventos.TipoOrden;
 import co.bolsasim.eventos.Topicos;
 import co.bolsasim.order.instrumento.Instrumento;
@@ -67,7 +68,7 @@ class ServicioOrdenesTest {
     }
 
     @Test
-    void unaOrdenValidaSeGuardaPendienteYSuComandoQuedaEnElOutbox() {
+    void unaOrdenValidaSeGuardaPendienteYPideSuReservaEnElOutbox() {
         Orden orden = servicio.crear(REGISTRADO.toString(), CLAVE, orden("andx", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100)).orden();
 
         assertThat(orden.getEstado()).isEqualTo(EstadoOrden.PENDIENTE);
@@ -76,21 +77,97 @@ class ServicioOrdenesTest {
         assertThat(orden.getCantidadEjecutada()).isZero();
         assertThat(orden.getPrecioPromedio()).isNull();
 
-        // El comando es el de siempre, con la misma clave (el símbolo), y su ordenId es el id de la orden
-        ComandoOrden comando = comandoEnElOutbox();
-        assertThat(comando.ordenId()).isEqualTo(orden.getId());
-        assertThat(comando.accion()).isEqualTo(AccionComando.NUEVA);
-        assertThat(comando.usuarioId()).isEqualTo(REGISTRADO.toString());
-        assertThat(comando.simbolo()).isEqualTo("ANDX");
-        assertThat(comando.precioLimite()).isEqualTo(5_000L);
+        // Todavía no va al motor: primero portfolio-service reserva el dinero. La solicitud lleva la orden completa
+        // y el último precio (el inicial, porque ANDX no ha operado)
+        SolicitudReserva solicitud = solicitudEnElOutbox();
+        assertThat(solicitud.ordenId()).isEqualTo(orden.getId());
+        assertThat(solicitud.usuarioId()).isEqualTo(REGISTRADO.toString());
+        assertThat(solicitud.simbolo()).isEqualTo("ANDX");
+        assertThat(solicitud.lado()).isEqualTo(Lado.COMPRA);
+        assertThat(solicitud.precioLimite()).isEqualTo(5_000L);
+        assertThat(solicitud.cantidad()).isEqualTo(100);
+        assertThat(solicitud.ultimoPrecio()).isEqualTo(5_000L);
+        verify(outbox, never()).guardar(eq(Topicos.ORDERS_COMMANDS), any(), any());
     }
 
     @Test
-    void ordenAMercadoSinPrecioSeGuardaSinPrecio() {
+    void ordenAMercadoSinPrecioSeGuardaSinPrecioYPideLaReservaConElUltimoPrecio() {
         Orden orden = servicio.crear(REGISTRADO.toString(), CLAVE, orden("CAFE", Lado.VENTA, TipoOrden.MERCADO, null, 10)).orden();
 
         assertThat(orden.getPrecioLimite()).isNull();
-        assertThat(comandoEnElOutbox().precioLimite()).isNull();
+        SolicitudReserva solicitud = solicitudEnElOutbox();
+        assertThat(solicitud.precioLimite()).isNull();
+        assertThat(solicitud.ultimoPrecio()).isEqualTo(5_000L);
+    }
+
+    @Test
+    void unPrecioQueNoEsMultiploDelTickSeRechazaYNoGuardaNada() {
+        assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), CLAVE, orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_005L, 100)))
+                .isInstanceOf(PrecioInvalidoException.class)
+                .hasMessage("El precio 5.005 no es múltiplo del tick de ANDX (10 COP): usa, por ejemplo, 5.000 o 5.010.");
+        nadaGuardado();
+    }
+
+    @Test
+    void unPrecioAMasDeDiezPorCientoDelUltimoSeRechazaYNoGuardaNada() {
+        String mensaje = "está a más de 10 % del último precio de ANDX (5.000 COP): debe estar entre 4.500 y 5.500.";
+        assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), CLAVE, orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_510L, 100)))
+                .isInstanceOf(PrecioInvalidoException.class)
+                .hasMessage("El precio 5.510 " + mensaje);
+        // También hacia abajo, y también en una venta
+        assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), CLAVE, orden("ANDX", Lado.VENTA, TipoOrden.LIMITE, 4_490L, 100)))
+                .isInstanceOf(PrecioInvalidoException.class)
+                .hasMessage("El precio 4.490 " + mensaje);
+        nadaGuardado();
+    }
+
+    @Test
+    void losLimitesDeLaBandaSeAceptan() {
+        servicio.crear(REGISTRADO.toString(), CLAVE, orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_500L, 1));
+        servicio.crear(REGISTRADO.toString(), "otra-" + CLAVE, orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, 4_500L, 1));
+
+        verify(outbox, times(2)).guardar(eq(Topicos.ORDERS_REQUESTED), eq(REGISTRADO.toString()), any());
+    }
+
+    @Test
+    void conUnPrecioDeReferenciaQueNoEsRedondoLaBandaSeRedondeaHaciaAdentro() {
+        // 10 % de 3.505 es 350,5: el mínimo queda en 3.155 (3.154,5 hacia arriba) y el máximo en 3.855 (3.855,5
+        // hacia abajo). Con tick 5, 3.150 y 3.860 son los primeros precios por fuera
+        when(instrumentos.findById("TAYR")).thenReturn(Optional.of(instrumento("TAYR", EstadoInstrumento.ACTIVO, 3_505, 5)));
+
+        servicio.crear(REGISTRADO.toString(), CLAVE, orden("TAYR", Lado.COMPRA, TipoOrden.LIMITE, 3_155L, 1));
+        servicio.crear(REGISTRADO.toString(), "otra-" + CLAVE, orden("TAYR", Lado.COMPRA, TipoOrden.LIMITE, 3_855L, 1));
+        assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), "tercera-" + CLAVE,
+                orden("TAYR", Lado.COMPRA, TipoOrden.LIMITE, 3_150L, 1)))
+                .isInstanceOf(PrecioInvalidoException.class)
+                .hasMessageEndingWith("debe estar entre 3.155 y 3.855.");
+        assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), "cuarta-" + CLAVE,
+                orden("TAYR", Lado.COMPRA, TipoOrden.LIMITE, 3_860L, 1)))
+                .isInstanceOf(PrecioInvalidoException.class);
+    }
+
+    @Test
+    void unPrecioEnormeSeRechazaSinDesbordarse() {
+        // Múltiplo del tick, para que llegue a la banda: 10 × precio no cabría en un long
+        assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), CLAVE,
+                orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, 922_337_203_685_477_580L, 1)))
+                .isInstanceOf(PrecioInvalidoException.class)
+                .hasMessageEndingWith("debe estar entre 4.500 y 5.500.");
+        nadaGuardado();
+    }
+
+    @Test
+    void unInstrumentoSinPrecioDeReferenciaSeRechazaYNoGuardaNada() {
+        Instrumento sinPrecio = mock(Instrumento.class);
+        when(sinPrecio.activo()).thenReturn(true);
+        when(sinPrecio.getSimbolo()).thenReturn("ANDX");
+        when(sinPrecio.precioDeReferencia()).thenReturn(Optional.empty());
+        when(instrumentos.findById("ANDX")).thenReturn(Optional.of(sinPrecio));
+
+        assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), CLAVE, orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_000L, 100)))
+                .isInstanceOf(InstrumentoNoDisponibleException.class)
+                .hasMessageStartingWith("El instrumento ANDX todavía no tiene precio de referencia");
+        nadaGuardado();
     }
 
     @Test
@@ -307,14 +384,14 @@ class ServicioOrdenesTest {
         verifyNoInteractions(consulta);
     }
 
-    /** El comando que quedó en el outbox para orders.commands, con el símbolo como clave del mensaje. */
-    private ComandoOrden comandoEnElOutbox() {
+    /** La solicitud que quedó en el outbox para orders.requested, con el usuario como clave del mensaje. */
+    private SolicitudReserva solicitudEnElOutbox() {
         ArgumentCaptor<String> clave = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<Object> evento = ArgumentCaptor.forClass(Object.class);
-        verify(outbox).guardar(eq(Topicos.ORDERS_COMMANDS), clave.capture(), evento.capture());
-        ComandoOrden comando = (ComandoOrden) evento.getValue();
-        assertThat(clave.getValue()).isEqualTo(comando.simbolo());
-        return comando;
+        verify(outbox).guardar(eq(Topicos.ORDERS_REQUESTED), clave.capture(), evento.capture());
+        SolicitudReserva solicitud = (SolicitudReserva) evento.getValue();
+        assertThat(clave.getValue()).isEqualTo(solicitud.usuarioId());
+        return solicitud;
     }
 
     private void nadaGuardado() {
@@ -340,8 +417,13 @@ class ServicioOrdenesTest {
         return new CrearOrdenRequest(simbolo, lado, tipo, precio, cantidad);
     }
 
+    /** Precio inicial 5.000 y tick 10, como ANDX. */
     private static Instrumento instrumento(String simbolo, EstadoInstrumento estado) {
-        return new Instrumento(new InstrumentoActualizado(simbolo, "Empresa", "Sector", 5_000, 10, 1_000_000, estado,
-                Instant.now()));
+        return instrumento(simbolo, estado, 5_000, 10);
+    }
+
+    private static Instrumento instrumento(String simbolo, EstadoInstrumento estado, long precioInicial, long tick) {
+        return new Instrumento(new InstrumentoActualizado(simbolo, "Empresa", "Sector", precioInicial, tick, 1_000_000,
+                estado, Instant.now()));
     }
 }

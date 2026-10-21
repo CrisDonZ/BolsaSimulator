@@ -18,6 +18,7 @@ import co.bolsasim.eventos.ComandoOrden;
 import co.bolsasim.eventos.EstadoInstrumento;
 import co.bolsasim.eventos.InstrumentoActualizado;
 import co.bolsasim.eventos.Lado;
+import co.bolsasim.eventos.SolicitudReserva;
 import co.bolsasim.eventos.TipoOrden;
 import co.bolsasim.eventos.Topicos;
 import co.bolsasim.order.TokensDePrueba;
@@ -126,7 +127,7 @@ class OrdenControllerTest {
                 .andExpect(header().string(HttpHeaders.LOCATION, "/api/ordenes/" + original.getId()))
                 .andExpect(header().string(OrdenController.IDEMPOTENT_REPLAYED, "true"))
                 .andExpect(jsonPath("$.ordenId").value(original.getId().toString()))
-                .andExpect(jsonPath("$.mensaje").value("Orden recibida: va en camino al motor"));
+                .andExpect(jsonPath("$.mensaje").value("Orden recibida: se reserva tu saldo y después va al motor"));
         verifyNoInteractions(outbox);
     }
 
@@ -263,16 +264,28 @@ class OrdenControllerTest {
     }
 
     @Test
-    void conUnTokenValidoLaOrdenQuedaEnElOutboxANombreDelSubDelToken() throws Exception {
+    void conUnTokenValidoLaSolicitudDeReservaQuedaEnElOutboxANombreDelSubDelToken() throws Exception {
         enviar(ORDEN, TokensDePrueba.valido(USUARIO))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.simbolo").value("ANDX"))
                 .andExpect(jsonPath("$.ordenId").isNotEmpty());
 
-        ArgumentCaptor<Object> comando = ArgumentCaptor.forClass(Object.class);
-        verify(outbox).guardar(eq(Topicos.ORDERS_COMMANDS), eq("ANDX"), comando.capture());
-        assertThat(((ComandoOrden) comando.getValue()).usuarioId()).isEqualTo(USUARIO);
-        assertThat(((ComandoOrden) comando.getValue()).simbolo()).isEqualTo("ANDX");
+        ArgumentCaptor<Object> solicitud = ArgumentCaptor.forClass(Object.class);
+        verify(outbox).guardar(eq(Topicos.ORDERS_REQUESTED), eq(USUARIO), solicitud.capture());
+        assertThat(((SolicitudReserva) solicitud.getValue()).usuarioId()).isEqualTo(USUARIO);
+        assertThat(((SolicitudReserva) solicitud.getValue()).simbolo()).isEqualTo("ANDX");
+    }
+
+    @Test
+    void unPrecioFueraDelTickODeLaBandaResponde422YNoSeGuarda() throws Exception {
+        enviar(ORDEN.replace("5000", "5005"), TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.title").value("Precio no válido"))
+                .andExpect(jsonPath("$.detail").value(startsWith("El precio 5.005 no es múltiplo del tick de ANDX")));
+        enviar(ORDEN.replace("5000", "6000"), TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.detail").value(containsString("debe estar entre 4.500 y 5.500")));
+        verifyNoInteractions(outbox);
     }
 
     @Test

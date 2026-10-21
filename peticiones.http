@@ -2,8 +2,8 @@
 ### en VS Code, con la extensión REST Client, haz clic en "Send Request".
 ###
 ### Todo pasa por el gateway (puerto 8080), que exige un token salvo para registrarse, iniciar sesión,
-### renovar el token y leer la clave pública. Una orden de un instrumento que no existe o está suspendido
-### responde 422.
+### renovar el token y leer la clave pública. Una orden de un instrumento que no existe o está suspendido, o con
+### un precio que no es múltiplo del tick o está a más de 10 % del último precio, responde 422.
 ###
 ### Cada orden lleva el header Idempotency-Key (HU-10): una clave única por orden, de 16 a 64 letras, números,
 ### - o _ (por ejemplo un UUID). Si envías la misma petición otra vez con la misma clave, NO se crea otra orden:
@@ -76,7 +76,8 @@ Authorization: Bearer {{token}}
 
 ### 6. Compra límite: 100 acciones de ANDX pagando máximo 5.000 COP cada una (a nombre del usuario del token).
 ###    Responde 202 con el "ordenId": pégalo en @ordenId para consultarla con la 29. Envíala dos veces: la
-###    segunda responde la misma orden con "Idempotent-Replayed: true", y no se crea otra.
+###    segunda responde la misma orden con "Idempotent-Replayed: true", y no se crea otra. Antes de ir al motor,
+###    portfolio-service reserva 500.000 COP: la 35 los muestra en saldoReservado.
 POST {{gateway}}/api/ordenes
 Idempotency-Key: peticion-06-cambia-esta-clave
 Authorization: Bearer {{token}}
@@ -365,8 +366,8 @@ Content-Type: application/json
 GET {{gateway}}/api/cuenta
 Authorization: Bearer {{token}}
 
-### 36. Tus movimientos de dinero, del más reciente al más viejo. Por ahora solo SALDO_INICIAL; las reservas,
-###     compras y ventas llegan con HU-05. Si hay más, pega "siguiente" en el parámetro despues.
+### 36. Tus movimientos de dinero, del más reciente al más viejo: SALDO_INICIAL, y RESERVA, COMPRA y LIBERACION
+###     de tus compras. Si hay más, pega "siguiente" en el parámetro despues.
 GET {{gateway}}/api/cuenta/movimientos?tamano=20
 Authorization: Bearer {{token}}
 
@@ -377,3 +378,49 @@ Authorization: Bearer {{token}}
 ### 38. Error a propósito: un tipo que no existe -> 400 con la lista de tipos válidos
 GET {{gateway}}/api/cuenta/movimientos?tipo=REGALO
 Authorization: Bearer {{token}}
+
+### 39. Error a propósito: un precio que no es múltiplo del tick (ANDX va de 10 en 10) -> 422 "El precio 5.005 no
+###     es múltiplo del tick de ANDX (10 COP)". No se guarda nada.
+POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-39-cambia-esta-clave
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "simbolo": "ANDX",
+  "lado": "COMPRA",
+  "tipo": "LIMITE",
+  "precioLimite": 5005,
+  "cantidad": 100
+}
+
+### 40. Error a propósito: un precio a más de 10 % del último precio -> 422 "debe estar entre 4.500 y 5.500" (si
+###     ANDX sigue en 5.000; después de una operación, la banda se mueve con su precio)
+POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-40-cambia-esta-clave
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "simbolo": "ANDX",
+  "lado": "COMPRA",
+  "tipo": "LIMITE",
+  "precioLimite": 6000,
+  "cantidad": 100
+}
+
+### 41. Sin saldo suficiente: 10.000 ANDX a 5.000 necesitan 50.000.000. Responde 202, porque la reserva se hace
+###     después; con la 29 (pega su ordenId) la ves RECHAZADA con el motivo "Saldo insuficiente: tienes X COP
+###     disponibles y la orden necesita 50.000.000 COP." Nunca llega al motor.
+POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-41-cambia-esta-clave
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "simbolo": "ANDX",
+  "lado": "COMPRA",
+  "tipo": "LIMITE",
+  "precioLimite": 5000,
+  "cantidad": 10000
+}

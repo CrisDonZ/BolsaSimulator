@@ -7,7 +7,11 @@ import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
-/** Tabla CUENTA, con JDBC. */
+/**
+ * Tabla CUENTA, con JDBC. Cada cambio de saldo es un solo UPDATE que suma o resta sobre el valor de la base, no
+ * sobre uno leído antes: PostgreSQL bloquea la fila mientras tanto, así dos eventos a la vez sobre la misma cuenta
+ * no se pisan (regla 5) y la condición de saldo suficiente se revisa en el mismo paso que el cambio.
+ */
 @Repository
 public class RepositorioCuentas {
 
@@ -46,5 +50,44 @@ public class RepositorioCuentas {
                 .param("usuario", usuarioId)
                 .query(Cuenta.class)
                 .optional();
+    }
+
+    /**
+     * Pasa ese monto del disponible al reservado, solo si el disponible alcanza.
+     *
+     * @return false si no alcanza; la cuenta no cambia
+     */
+    public boolean reservar(UUID cuentaId, long monto, Instant ahora) {
+        return jdbc.sql("""
+                        UPDATE cuenta
+                        SET saldo_disponible = saldo_disponible - :monto, saldo_reservado = saldo_reservado + :monto,
+                            version = version + 1, actualizado_en = :ahora
+                        WHERE id = :id AND saldo_disponible >= :monto""")
+                .param("id", cuentaId)
+                .param("monto", monto)
+                .param("ahora", ahora.atOffset(ZoneOffset.UTC))
+                .update() == 1;
+    }
+
+    /**
+     * Paga una compra: sale del reservado lo que cubre la reserva y del disponible lo que no alcanzó a cubrir (solo
+     * en una compra a mercado que se ejecuta por encima de lo reservado), y devuelve al disponible lo que se
+     * libera.
+     *
+     * @return false si el disponible no alcanza para la parte que no cubría la reserva; la cuenta no cambia
+     */
+    public boolean pagarYLiberar(UUID cuentaId, long delReservado, long delDisponible, long liberado, Instant ahora) {
+        return jdbc.sql("""
+                        UPDATE cuenta
+                        SET saldo_reservado = saldo_reservado - :delReservado - :liberado,
+                            saldo_disponible = saldo_disponible - :delDisponible + :liberado,
+                            version = version + 1, actualizado_en = :ahora
+                        WHERE id = :id AND saldo_disponible + :liberado >= :delDisponible""")
+                .param("id", cuentaId)
+                .param("delReservado", delReservado)
+                .param("delDisponible", delDisponible)
+                .param("liberado", liberado)
+                .param("ahora", ahora.atOffset(ZoneOffset.UTC))
+                .update() == 1;
     }
 }

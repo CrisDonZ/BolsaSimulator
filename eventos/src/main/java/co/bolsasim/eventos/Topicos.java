@@ -6,6 +6,15 @@ package co.bolsasim.eventos;
  */
 public final class Topicos {
 
+    /**
+     * Órdenes nuevas que piden su reserva a portfolio-service. Clave del mensaje = id del usuario: las solicitudes
+     * de un usuario se procesan una tras otra, así no gasta dos veces el mismo saldo.
+     */
+    public static final String ORDERS_REQUESTED = "orders.requested";
+
+    /** Reserva aceptada o rechazada, la respuesta de portfolio-service. Clave del mensaje = id del usuario. */
+    public static final String RESERVATIONS_EVENTS = "reservations.events";
+
     /** Comandos NUEVA y CANCELAR que van al motor. Clave del mensaje = símbolo. */
     public static final String ORDERS_COMMANDS = "orders.commands";
 

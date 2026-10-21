@@ -25,13 +25,26 @@ spring:
   kafka:
     # Dirección de Kafka vista desde tu computador (ver docker-compose.yml)
     bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # Convierte el record ReservaProcesada a JSON con Jackson 3
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      # Kafka confirma el mensaje solo cuando quedó guardado de forma segura
+      acks: all
+      properties:
+        # Como en order-service: con Kafka caído, una ronda del outbox se rinde en 10 s y las respuestas esperan
+        # en la tabla outbox
+        "[delivery.timeout.ms]": 10000
+        "[request.timeout.ms]": 5000
+        "[max.block.ms]": 5000
     consumer:
-      # Lee users.registered para abrir la cuenta de cada usuario
+      # Lee users.registered para abrir la cuenta de cada usuario, orders.requested para reservar el saldo de cada
+      # orden y orders.events para liquidar lo que ejecuta el motor
       group-id: portfolio-service
       # Si el grupo es nuevo, lee el tópico desde el principio: así abre las cuentas de los usuarios que ya
       # estaban registrados
       auto-offset-reset: earliest
-      # Solo lee mensajes de transacciones confirmadas
+      # Solo lee mensajes de transacciones confirmadas: si el motor aborta una (RNF-10), sus eventos no llegan
       isolation-level: read-committed
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       # ErrorHandlingDeserializer evita que un mensaje mal formado bloquee al consumidor

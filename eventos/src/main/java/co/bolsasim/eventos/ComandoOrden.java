@@ -1,5 +1,6 @@
 package co.bolsasim.eventos;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.UUID;
@@ -47,5 +48,17 @@ public record ComandoOrden(
                 precioLimite,
                 cantidad,
                 Instant.now());
+    }
+
+    /**
+     * El comando NUEVA de una orden que ya existe, cuando su reserva se aceptó. El comandoId sale del ordenId:
+     * si la aceptación se procesara dos veces, el motor recibiría el mismo comando y lo reconocería como
+     * repetido, en vez de meter la orden dos veces en el libro.
+     */
+    public static ComandoOrden paraOrden(UUID ordenId, String usuarioId, String simbolo, Lado lado, TipoOrden tipo,
+                                         Long precioLimite, int cantidad) {
+        UUID comandoId = UUID.nameUUIDFromBytes((ordenId + "/NUEVA").getBytes(StandardCharsets.UTF_8));
+        return new ComandoOrden(comandoId, AccionComando.NUEVA, ordenId, usuarioId, simbolo, lado, tipo, precioLimite,
+                cantidad, Instant.now());
     }
 }

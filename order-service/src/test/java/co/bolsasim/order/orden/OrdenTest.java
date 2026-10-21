@@ -3,6 +3,7 @@ package co.bolsasim.order.orden;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import co.bolsasim.eventos.AccionComando;
 import co.bolsasim.eventos.ComandoOrden;
 import co.bolsasim.eventos.EstadoOrden;
 import co.bolsasim.eventos.Lado;
@@ -12,7 +13,7 @@ import java.time.Instant;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
-/** Prueba unitaria de cómo cambia una orden con los eventos del motor: Java puro. */
+/** Prueba unitaria de cómo cambia una orden con la respuesta de la reserva y los eventos del motor: Java puro. */
 class OrdenTest {
 
     private static final Instant AHORA = Instant.parse("2026-10-20T15:00:00Z");
@@ -78,5 +79,52 @@ class OrdenTest {
                 .isInstanceOf(EventoImposibleException.class);
         assertThatThrownBy(() -> orden.aplicar(EstadoOrden.RECHAZADA, 100, 0, null, null, AHORA))
                 .isInstanceOf(EventoImposibleException.class);
+    }
+
+    @Test
+    void conLaReservaAceptadaElComandoLlevaLaOrdenCompletaYSiempreElMismoId() {
+        ComandoOrden comando = orden.comandoParaElMotor();
+
+        assertThat(comando.accion()).isEqualTo(AccionComando.NUEVA);
+        assertThat(comando.ordenId()).isEqualTo(orden.getId());
+        assertThat(comando.usuarioId()).isEqualTo(orden.getUsuarioId().toString());
+        assertThat(comando.simbolo()).isEqualTo("ANDX");
+        assertThat(comando.lado()).isEqualTo(Lado.COMPRA);
+        assertThat(comando.precioLimite()).isEqualTo(5_000L);
+        assertThat(comando.cantidad()).isEqualTo(100);
+        // Si la aceptación se procesara dos veces, el motor recibiría el mismo comandoId y lo ignoraría
+        assertThat(orden.comandoParaElMotor().comandoId()).isEqualTo(comando.comandoId());
+    }
+
+    @Test
+    void unaOrdenQueYaNoEstaPendienteNoVuelveAlMotor() {
+        orden.aplicar(EstadoOrden.ABIERTA, 100, 0, null, null, AHORA);
+
+        assertThatThrownBy(orden::comandoParaElMotor)
+                .isInstanceOf(EventoImposibleException.class)
+                .hasMessage("la reserva se aceptó, pero la orden ya está ABIERTA");
+    }
+
+    @Test
+    void conLaReservaRechazadaQuedaRechazadaConElMotivo() {
+        orden.rechazar("Saldo insuficiente: tienes 1.000 COP disponibles.", AHORA.plusSeconds(1));
+
+        assertThat(orden.getEstado()).isEqualTo(EstadoOrden.RECHAZADA);
+        assertThat(orden.getMotivo()).isEqualTo("Saldo insuficiente: tienes 1.000 COP disponibles.");
+        assertThat(orden.getActualizadaEn()).isEqualTo(AHORA.plusSeconds(1));
+        // Terminó: ni el motor ni otra respuesta de la reserva la cambian
+        assertThatThrownBy(() -> orden.aplicar(EstadoOrden.ABIERTA, 100, 0, null, null, AHORA))
+                .isInstanceOf(EventoImposibleException.class);
+        assertThatThrownBy(orden::comandoParaElMotor).isInstanceOf(EventoImposibleException.class);
+    }
+
+    @Test
+    void unaOrdenQueElMotorYaTieneNoSePuedeRechazar() {
+        orden.aplicar(EstadoOrden.PARCIAL, 100, 40, BigDecimal.TEN, null, AHORA);
+
+        assertThatThrownBy(() -> orden.rechazar("Saldo insuficiente", AHORA))
+                .isInstanceOf(EventoImposibleException.class)
+                .hasMessage("la reserva se rechazó, pero la orden ya está PARCIAL");
+        assertThat(orden.getEstado()).isEqualTo(EstadoOrden.PARCIAL);
     }
 }

@@ -36,8 +36,9 @@ public class OrdenController {
     }
 
     /**
-     * Responde 202 Accepted y no 201 Created: la orden quedó guardada, pero el motor la procesa después,
-     * de forma asíncrona. El header Location dice dónde consultar cómo va.
+     * Responde 202 Accepted y no 201 Created: la orden quedó guardada, pero la reserva y el motor la procesan
+     * después, de forma asíncrona. El header Location dice dónde consultar cómo va: si no hay saldo, la orden
+     * queda RECHAZADA con el motivo.
      *
      * <p>El header Idempotency-Key es obligatorio (HU-10): si la misma solicitud llega otra vez con la misma
      * clave, la respuesta es exactamente la original, más el header Idempotent-Replayed: true.
@@ -52,7 +53,7 @@ public class OrdenController {
         if (creada.repetida()) {
             respuesta.header(IDEMPOTENT_REPLAYED, "true");
         }
-        return respuesta.body(new OrdenAceptadaResponse(orden.getId(), orden.getSimbolo(), "Orden recibida: va en camino al motor"));
+        return respuesta.body(new OrdenAceptadaResponse(orden.getId(), orden.getSimbolo(), "Orden recibida: se reserva tu saldo y después va al motor"));
     }
 
     /** La orden de otro usuario responde 404, igual que una que no existe (RNF-23). */

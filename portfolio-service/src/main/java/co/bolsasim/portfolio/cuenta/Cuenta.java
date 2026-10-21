@@ -8,7 +8,7 @@ import java.util.UUID;
  *
  * @param saldoInicial    con lo que empezó; la base para calcular la rentabilidad (ranking)
  * @param saldoDisponible dinero libre para operar
- * @param saldoReservado  dinero bloqueado en órdenes abiertas (llegará con las reservas de HU-05)
+ * @param saldoReservado  dinero bloqueado en órdenes abiertas: la suma de sus reservas ACTIVAS
  */
 public record Cuenta(
         UUID id,
