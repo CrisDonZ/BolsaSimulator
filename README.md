@@ -48,17 +48,19 @@ Postman / curl ──▶ gateway                            (puerto 8082) ──
 | `matching-engine/` | El libro de órdenes (`libro/`, Java puro con pruebas JUnit) y su consumidor de Kafka. Por cada comando publica `EventoOrden` en `orders.events` y `OperacionEjecutada` en `trades.executed`, dentro de una transacción de Kafka junto con el offset del comando (RNF-10). Reconoce un comando repetido y reenvía lo mismo sin tocar el libro (RNF-09). Ejecuta una orden a mercado solo dentro de ±10 % del precio de referencia que trae su comando y cancela el resto (RF-26). |
 | `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. Vuelve a validar el JWT en las rutas protegidas: cada usuario solo consulta su propio perfil y solo cierra sus propias sesiones. Al arrancar crea el primer `ADMIN` con las variables `BOLSASIM_ADMIN_CORREO` y `BOLSASIM_ADMIN_CONTRASENA`, y el bot creador de mercado (rol `BOT`) con `BOLSASIM_CREADOR_MERCADO_CORREO` y `BOLSASIM_CREADOR_MERCADO_CONTRASENA`. |
 | `gateway/` | Spring Cloud Gateway (WebFlux) en el puerto 8080: enruta a auth-service, order-service, market-data-service y portfolio-service y exige un JWT válido, verificado con la clave pública de auth-service, salvo para registrarse, iniciar sesión, renovar el token y leer la clave. Reenvía el token original sin cambiarlo. |
+| `frontend/` | La aplicación web (React 19 con TypeScript, Vite y React Router): registro (HU-01), inicio y cierre de sesión con renovación automática del token (HU-02) y la pantalla Mercado con la lista de instrumentos y un buscador (inicio de HU-14). Habla solo con el gateway. Ver *Frontend* abajo. |
 | `docker-compose.yml` | Kafka (modo KRaft), creación de tópicos, Kafka UI y PostgreSQL. |
 | `postgres/init.sql` | Crea una base por servicio la primera vez que arranca PostgreSQL. |
 | `peticiones.http` | Registro, login, órdenes e instrumentos de ejemplo, listos para enviar desde IntelliJ o la extensión REST Client de VS Code. |
 | `enviar-ordenes.ps1` | Inicia sesión y envía varias órdenes de una vez desde PowerShell (ver el libro de órdenes abajo). |
 
-Versiones: Java 21, Spring Boot 4.1.1 (incluye Spring Kafka 4.1.1), Spring Cloud 2025.1.3 (Gateway 5.0.3), Apache Kafka 4.2.1, PostgreSQL 17.
+Versiones: Node 24 para el frontend (React 19.3, Vite 8.3, TypeScript 6.0); Java 21, Spring Boot 4.1.1 (incluye Spring Kafka 4.1.1), Spring Cloud 2025.1.3 (Gateway 5.0.3), Apache Kafka 4.2.1, PostgreSQL 17.
 
 ## Requisitos
 
 - **Java 21**: verifica con `java -version`.
 - **Docker Desktop** abierto.
+- **Node 22.22 o más nuevo** (recomendado 24), solo para el frontend: verifica con `node --version`.
 - **Maven no hace falta instalarlo**: el proyecto trae el Maven Wrapper (`mvnw`), que descarga la versión correcta la primera vez.
 
 En PowerShell los comandos son `.\mvnw.cmd ...`; en Git Bash, macOS o Linux, `./mvnw ...`.
@@ -385,6 +387,63 @@ La banda es la misma de las órdenes límite (`BandaPrecio`, en el módulo `even
 - **El motor no consulta a nadie para cruzar:** todo sale del comando y del libro en memoria. Procesar el mismo comando otra vez da el mismo resultado.
 - **Falla cerrada.** Una orden a mercado que llega sin referencia o con una inválida (por ejemplo, un comando de antes de esta versión) se cancela completa, sin tocar el libro, y el motor deja un `WARN`. Nunca se ejecuta sin límite.
 
+## Frontend
+
+La aplicación web vive en `frontend/`. Corre con los servicios y el gateway levantados (pasos 1 a 7 de *Cómo correrlo*):
+
+```bash
+cd frontend
+npm ci          # la primera vez: instala exactamente lo que dice package-lock.json
+npm run dev     # http://localhost:5173
+```
+
+Abre `http://localhost:5173`, crea tu cuenta y entra a **Mercado**: ahí están los instrumentos con su precio y su estado, y un buscador por símbolo o nombre ("and" encuentra ANDX). Por ahora el precio es el inicial; el último precio, la variación del día y la actualización en vivo llegan con el resto de HU-14.
+
+| Comando | Qué hace |
+| --- | --- |
+| `npm run dev` | Servidor de desarrollo en el puerto 5173, con recarga en caliente |
+| `npm test` | Pruebas con Vitest y Testing Library (29), sin backend: `fetch` es simulado |
+| `npm run lint` / `npm run typecheck` | ESLint y TypeScript en modo estricto, sin advertencias |
+| `npm run build` | La app lista para producción en `frontend/dist/`, con su Content-Security-Policy |
+| `npm run preview` | Sirve `dist/` en el puerto 4173 con los headers de seguridad, para probar el build |
+
+**Un solo origen.** El navegador solo le habla a `localhost:5173`: Vite reenvía `/api` al gateway (`localhost:8080`). Así no hace falta abrir CORS en el gateway, y en producción la app y la API se sirven desde el mismo dominio.
+
+**Estructura**, por funcionalidad, para que la ficha del instrumento, el portafolio y las órdenes entren sin mover lo que ya existe:
+
+| Carpeta | Qué contiene |
+| --- | --- |
+| `src/api/` | El único lugar que llama a `fetch` (`cliente.ts`), los tipos de la API escritos igual que los DTO del backend (`tipos.ts`) y dónde viven los tokens (`almacenTokens.ts`) |
+| `src/sesion/` | La sesión (`SesionProvider`), las rutas protegidas e Ingresar y Registrarme |
+| `src/mercado/` | La pantalla Mercado, que se carga aparte (`React.lazy`) para no pesar en el login |
+| `src/comun/` | La plantilla con el encabezado y el aviso legal, los campos de formulario y el formato de pesos |
+
+**Sesión (HU-02).**
+
+- El cliente HTTP pone el token de acceso en cada petición.
+- Con un `401` lo renueva con el de refresco y reintenta una sola vez. Si varias peticiones fallan a la vez, sale un solo `/refresh`. Si el refresco ya no sirve, la sesión se cierra y la app lleva a Ingresar.
+- Al recargar la página, la sesión se recupera con el token de refresco.
+- Cerrar sesión revoca el token en auth-service y borra todo lo local, aunque el servidor no responda.
+
+**Dónde viven los tokens, y por qué:**
+
+- **El de acceso** (15 minutos) solo en memoria. Nunca toca `localStorage` ni `sessionStorage`.
+- **El de refresco** en `sessionStorage`. Sobrevive a recargar la página y se borra al cerrar la pestaña. Un ataque XSS podría leerlo; para que no haya por dónde, la app nunca inserta HTML crudo (ESLint prohíbe `dangerouslySetInnerHTML` e `innerHTML`) y el build lleva una Content-Security-Policy que solo permite scripts del mismo origen. El reemplazo definitivo es una cookie `HttpOnly` (ver *Siguientes pasos*).
+- **El rol** que muestra el encabezado se lee del JWT solo para mostrarlo. Quien valida el token y decide qué puede hacer cada rol es el backend.
+
+**Registro (HU-01).**
+
+- Solo pide nombre, alias, correo y contraseña (RNF-30).
+- Valida lo mismo que auth-service antes de enviar.
+- Registrarme queda desactivado hasta aceptar el tratamiento de datos (RNF-28).
+
+**Lo que vale para todas las pantallas:**
+
+- Los errores son el `detail` que manda el servicio, tal cual (RNF-44). Un `5xx` no muestra detalles internos.
+- Todas llevan el aviso de simulación educativa (RNF-29).
+- Funcionan desde 360 px de ancho (RNF-41).
+- Tienen contraste AA, se manejan con el teclado y el estado de cada instrumento se lee en el texto, no solo en el color (RNF-42).
+
 ## Dos experimentos para entender Kafka
 
 1. **La clave decide la partición.** Envía 3 órdenes de ANDX y 3 de CAFE. Todas las de ANDX caen en la misma partición, y lo mismo pasa con CAFE. Por eso el motor nunca recibe las órdenes de un símbolo en desorden.
@@ -466,5 +525,8 @@ GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba d
 - **Bots de mercado (HU-24):** el creador de mercado ya existe y tiene las acciones emitidas; falta bot-service, que pone sus órdenes de compra y venta según una estrategia.
 - **Autocruce (RF-27):** hoy una orden puede cruzarse con otra del mismo usuario; el motor debe cancelar la entrante.
 - **Outbox en auth-service y market-data-service:** order-service y portfolio-service ya lo usan. En auth-service, si Kafka está caído justo después de registrar a alguien, el evento se pierde (el del creador de mercado no, porque se vuelve a publicar en cada arranque). Con los instrumentos el daño es menor, porque market-data-service vuelve a publicar todo el catálogo cada vez que arranca.
+- **Token de refresco en una cookie `HttpOnly`:** hoy el frontend lo guarda en `sessionStorage`, que un ataque XSS podría leer. Con una cookie `HttpOnly`, `Secure` y `SameSite=Strict` que pongan auth-service y el gateway, el JavaScript de la página nunca lo ve.
+- **Explorar sin cuenta (HU-17):** el gateway exige token incluso para `GET /api/instrumentos`; falta abrir los datos públicos de mercado (RNF-22) para que un visitante vea Mercado en modo solo lectura.
+- **Imagen Docker del frontend (RNF-47):** `frontend/dist` servido por un servidor web con la CSP y los demás headers de seguridad en la respuesta, detrás del mismo dominio que el gateway.
 - **Mercado abierto (RF-16, HU-23):** order-service valida el tick y la banda; falta rechazar órdenes con el mercado cerrado, que llega con `market.status`. Hasta entonces el mercado está siempre abierto.
 - **Límite de órdenes (RNF-24):** 20 órdenes por segundo por usuario en el gateway; el exceso recibe 429.
