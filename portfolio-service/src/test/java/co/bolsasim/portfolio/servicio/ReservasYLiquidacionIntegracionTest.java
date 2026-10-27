@@ -292,6 +292,57 @@ class ReservasYLiquidacionIntegracionTest {
     }
 
     @Test
+    void unaCompraAMercadoEjecutadaEnParteHastaElBordeDeLaBandaLiberaJustoLoQueSobra() {
+        // Referencia 5.000: reserva ceil(100 × 5.000 × 1,10) = 550.000 y la banda llega hasta 5.500
+        SolicitudReserva compra = aMercado(100, 5_000);
+        reservas.procesar(compra);
+
+        liquidacion.aplicar(evento(compra, EstadoOrden.PARCIAL, 30, ejecucion(5_000, 30)));
+        liquidacion.aplicar(evento(compra, EstadoOrden.PARCIAL, 60, ejecucion(5_500, 30)));
+        // El motor corta en la banda y cancela las 40 que faltan
+        liquidacion.aplicar(evento(compra, EstadoOrden.CANCELADA, 60, null));
+
+        // Pagó 150.000 + 165.000 y liberó 550.000 − 315.000
+        assertThat(cuenta().saldoReservado()).isZero();
+        assertThat(cuenta().saldoDisponible()).isEqualTo(SALDO_INICIAL - 315_000);
+        assertThat(reserva(compra.ordenId())).isEqualTo(new FilaReserva(550_000, 315_000, 235_000, "CONSUMIDA"));
+        assertThat(movimientos("LIBERACION")).containsExactly(235_000L);
+        cuadra();
+    }
+
+    @Test
+    void todaUnaCompraAMercadoAlMaximoDeLaBandaCabeEnSuReserva() {
+        // Referencia 3.505: reserva ceil(3 × 3.505 × 1,10) = 11.567 y el máximo es floor(3.855,5) = 3.855
+        SolicitudReserva compra = aMercado(3, 3_505);
+        reservas.procesar(compra);
+
+        assertThat(liquidacion.aplicar(evento(compra, EstadoOrden.EJECUTADA, 3, ejecucion(3_855, 3)))).isTrue();
+
+        assertThat(reserva(compra.ordenId())).isEqualTo(new FilaReserva(11_567, 11_565, 2, "CONSUMIDA"));
+        cuadra();
+    }
+
+    @Test
+    void unaCompraAMercadoQueCostaraMasDeLoReservadoNoSeLiquidaYNoTocaElDisponible() {
+        SolicitudReserva compra = aMercado(10, 5_000);
+        reservas.procesar(compra);
+        // 10 a 6.000 = 60.000, más que los 55.000 reservados: el motor nunca debería ejecutarla fuera de la banda
+        EventoOrden imposible = evento(compra, EstadoOrden.EJECUTADA, 10, ejecucion(6_000, 10));
+
+        assertThatThrownBy(() -> liquidacion.aplicar(imposible))
+                .isInstanceOf(EventoImposibleException.class)
+                .hasMessage("la compra cuesta 60000 COP y a la reserva solo le quedan 55000");
+
+        // No se tomó nada del disponible y no quedó nada a medias: ni la posición ni la marca del evento
+        assertThat(cuenta().saldoDisponible()).isEqualTo(SALDO_INICIAL - 55_000);
+        assertThat(cuenta().saldoReservado()).isEqualTo(55_000);
+        assertThat(posiciones.buscar(cuenta().id(), "ANDX")).isEmpty();
+        assertThat(jdbc.sql("SELECT count(*) FROM evento_procesado WHERE id_evento = :id")
+                .param("id", imposible.eventoId()).query(Integer.class).single()).isZero();
+        cuadra();
+    }
+
+    @Test
     void unEventoDeOtroUsuarioOSobreUnaReservaTerminadaNoSeLiquida() {
         SolicitudReserva compra = compraLimite(5_000, 100);
         reservas.procesar(compra);
@@ -339,6 +390,11 @@ class ReservasYLiquidacionIntegracionTest {
     private SolicitudReserva compraLimite(long precio, int cantidad) {
         return new SolicitudReserva(UUID.randomUUID(), UUID.randomUUID(), ana.toString(), "ANDX", Lado.COMPRA,
                 TipoOrden.LIMITE, precio, cantidad, 5_000, Instant.now());
+    }
+
+    private SolicitudReserva aMercado(int cantidad, long referencia) {
+        return new SolicitudReserva(UUID.randomUUID(), UUID.randomUUID(), ana.toString(), "ANDX", Lado.COMPRA,
+                TipoOrden.MERCADO, null, cantidad, referencia, Instant.now());
     }
 
     private EventoOrden evento(SolicitudReserva compra, EstadoOrden estado, int ejecutada, EjecucionOrden ejecucion) {

@@ -424,6 +424,19 @@ class OrdenControllerTest {
     }
 
     @Test
+    void elClienteNoPuedeElegirElPrecioDeReferenciaDeUnaOrdenAMercado() throws Exception {
+        // Con una referencia inventada, una compra a mercado reservaría poco y el motor la dejaría ejecutar caro: la
+        // referencia solo la pone order-service (RF-26)
+        String conReferencia = """
+                {"simbolo":"ANDX","lado":"COMPRA","tipo":"MERCADO","precioReferencia":1,"cantidad":100}""";
+
+        enviar(conReferencia, TokensDePrueba.valido(USUARIO))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail").value(startsWith("La orden trae un campo que no existe")));
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
     void unLadoQueNoExisteResponde400() throws Exception {
         enviar(ORDEN.replace("COMPRA", "REGALO"), TokensDePrueba.valido(USUARIO))
                 .andExpect(status().isBadRequest())

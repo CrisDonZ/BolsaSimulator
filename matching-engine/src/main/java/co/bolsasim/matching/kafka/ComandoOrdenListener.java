@@ -1,6 +1,8 @@
 package co.bolsasim.matching.kafka;
 
+import co.bolsasim.eventos.AccionComando;
 import co.bolsasim.eventos.ComandoOrden;
+import co.bolsasim.eventos.TipoOrden;
 import co.bolsasim.eventos.Topicos;
 import co.bolsasim.matching.libro.Ejecucion;
 import co.bolsasim.matching.motor.Mensaje;
@@ -37,11 +39,19 @@ public class ComandoOrdenListener {
     @KafkaListener(topics = Topicos.ORDERS_COMMANDS, groupId = "matching-engine")
     public void recibir(ConsumerRecord<String, ComandoOrden> registro) {
         ComandoOrden comando = registro.value();
-        String precio = comando.precioLimite() == null ? "a mercado" : "a " + comando.precioLimite() + " COP";
+        String precio = comando.precioLimite() == null
+                ? "a mercado (referencia " + comando.precioReferencia() + " COP)"
+                : "a " + comando.precioLimite() + " COP";
 
         log.info("Orden recibida: {} {} {} acciones de {} {} | partición {}, offset {}",
                 comando.accion(), comando.lado(), comando.cantidad(), comando.simbolo(), precio,
                 registro.partition(), registro.offset());
+        if (comando.accion() == AccionComando.NUEVA && comando.tipo() == TipoOrden.MERCADO
+                && (comando.precioReferencia() == null || comando.precioReferencia() <= 0)) {
+            // Un comando de antes de HU-07 o un error de order-service: sin banda no se ejecuta (RF-26)
+            log.warn("Orden {} a mercado sin precio de referencia válido: se cancela sin tocar el libro",
+                    comando.ordenId());
+        }
 
         MotorEmparejamiento.Procesado procesado = motor.procesar(comando);
         if (procesado.repetido()) {

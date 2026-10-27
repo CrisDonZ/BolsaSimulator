@@ -27,7 +27,9 @@ import org.springframework.transaction.annotation.Transactional;
  * <ul>
  *   <li>Compra (reserva de DINERO): cada ejecución se paga con la reserva y le suma las acciones al comprador. Con
  *       una compra LIMITE se libera en cada ejecución lo que se pagó por debajo del límite, (límite − precio) ×
- *       acciones, así lo reservado siempre es justo lo que falta por comprar al precio límite.</li>
+ *       acciones, así lo reservado siempre es justo lo que falta por comprar al precio límite. Una compra a MERCADO
+ *       reservó cantidad × referencia × 1,10 y el motor no la ejecuta por encima de ese 10 % (RF-26): si una
+ *       ejecución costara más de lo que queda reservado, el evento no se liquida.</li>
  *   <li>Venta (reserva de ACCIONES): cada ejecución entrega las acciones reservadas y cobra precio × acciones.</li>
  *   <li>Cuando la orden termina (EJECUTADA o CANCELADA), se libera lo que quede: el dinero que sobró de una compra o
  *       las acciones que no se vendieron.</li>
@@ -105,32 +107,33 @@ public class ServicioLiquidacion {
     private void liquidarCompra(Reserva reserva, EventoOrden evento, Instant ahora) {
         EjecucionOrden ejecucion = evento.ejecucion();
         long pendiente = reserva.pendiente();
-        long delReservado = 0;
-        long delDisponible = 0;
+        long pagado = 0;
         long liberado = 0;
         if (ejecucion != null) {
-            long costo = costo(reserva, ejecucion);
-            delReservado = Math.min(costo, pendiente);
-            // Solo en una compra a mercado que se ejecuta por encima de lo reservado; lo evitará la banda de ±10 %
-            // del motor (RF-26, HU-07)
-            delDisponible = costo - delReservado;
+            pagado = costo(reserva, ejecucion);
+            if (pagado > pendiente) {
+                // Con la banda de ±10 % del motor (RF-26) una compra a mercado nunca cuesta más de lo reservado. Si
+                // pasa, es un error: no se toma del disponible ni se deja la cuenta en negativo en silencio
+                throw new EventoImposibleException("la compra cuesta " + pagado + " COP y a la reserva solo le quedan "
+                        + pendiente);
+            }
             if (reserva.precioLimite() != null) {
-                long porDebajoDelLimite = (reserva.precioLimite() - ejecucion.precio()) * ejecucion.cantidad();
-                liberado = Math.min(porDebajoDelLimite, pendiente - delReservado);
+                long porDebajoDelLimite = Math.multiplyExact(reserva.precioLimite() - ejecucion.precio(),
+                        (long) ejecucion.cantidad());
+                liberado = Math.min(porDebajoDelLimite, pendiente - pagado);
             }
         }
         if (evento.estado().terminado()) {
-            liberado = pendiente - delReservado;
+            liberado = pendiente - pagado;
         }
 
-        if (!cuentas.pagarYLiberar(reserva.cuentaId(), delReservado, delDisponible, liberado, ahora)) {
-            throw new EventoImposibleException("la compra cuesta " + (delReservado + delDisponible)
-                    + " COP, la reserva solo cubría " + delReservado + " y el disponible no alcanza para el resto");
+        if (!cuentas.pagarYLiberar(reserva.cuentaId(), pagado, liberado, ahora)) {
+            throw new EventoImposibleException("la cuenta ya no tiene reservados los " + (pagado + liberado) + " COP");
         }
         if (ejecucion != null) {
             posiciones.acreditar(reserva.cuentaId(), evento.simbolo(), ejecucion.cantidad(), ejecucion.precio());
-            movimientos.registrar(reserva.cuentaId(), TipoMovimiento.COMPRA, -(delReservado + delDisponible),
-                    evento.simbolo(), (long) ejecucion.cantidad(), ejecucion.operacionId(), ahora);
+            movimientos.registrar(reserva.cuentaId(), TipoMovimiento.COMPRA, -pagado, evento.simbolo(),
+                    (long) ejecucion.cantidad(), ejecucion.operacionId(), ahora);
         }
         if (liberado > 0) {
             movimientos.registrar(reserva.cuentaId(), TipoMovimiento.LIBERACION, liberado, evento.simbolo(), null,
@@ -139,12 +142,12 @@ public class ServicioLiquidacion {
 
         EstadoReserva estado = EstadoReserva.ACTIVA;
         if (evento.estado().terminado()) {
-            estado = reserva.montoConsumido() + delReservado > 0 ? EstadoReserva.CONSUMIDA : EstadoReserva.LIBERADA;
+            estado = reserva.montoConsumido() + pagado > 0 ? EstadoReserva.CONSUMIDA : EstadoReserva.LIBERADA;
         }
-        reservas.registrar(reserva.id(), delReservado, liberado, estado, ahora);
+        reservas.registrar(reserva.id(), pagado, liberado, estado, ahora);
 
         log.info("Compra {} liquidada ({}): {} COP pagados, {} COP liberados, reserva {}", evento.ordenId(),
-                evento.estado(), delReservado + delDisponible, liberado, estado);
+                evento.estado(), pagado, liberado, estado);
     }
 
     /**

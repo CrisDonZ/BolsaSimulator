@@ -216,6 +216,100 @@ class LibroOrdenesTest {
     }
 
     @Test
+    void unaCompraAMercadoLlegaHastaElMaximoDeLaBandaYNoMasAlla() {
+        libro.procesar(ventaLimite("beto", 5_000, 30));
+        libro.procesar(ventaLimite("cara", 5_500, 30));
+        ComandoOrden fuera = ventaLimite("dani", 5_510, 30);
+        libro.procesar(fuera);
+
+        ResultadoComando resultado = libro.procesar(aMercado("ana", Lado.COMPRA, 100));
+
+        // Referencia 5.000: 5.500 es el máximo y cuenta; 5.510 queda fuera y se cancela el resto
+        assertThat(resultado.ejecuciones()).extracting(Ejecucion::precio, Ejecucion::cantidad)
+                .containsExactly(tuple(5_000L, 30), tuple(5_500L, 30));
+        assertThat(resultado.desenlace()).isEqualTo(ResultadoComando.Desenlace.FUERA_DE_BANDA);
+        // La venta fuera de la banda sigue en el libro, sin tocar, y la compra no quedó en él
+        assertThat(libro.pendienteDe(fuera.ordenId())).isEqualTo(30);
+        assertThat(libro.mejorVenta()).contains(5_510L);
+        assertThat(libro.mejorCompra()).isEmpty();
+    }
+
+    @Test
+    void unaVentaAMercadoLlegaHastaElMinimoDeLaBandaYNoMasAlla() {
+        libro.procesar(compraLimite("beto", 4_500, 40));
+        ComandoOrden fuera = compraLimite("cara", 4_490, 40);
+        libro.procesar(fuera);
+
+        ResultadoComando resultado = libro.procesar(aMercado("ana", Lado.VENTA, 100));
+
+        assertThat(resultado.ejecuciones()).singleElement().satisfies(e -> {
+            assertThat(e.precio()).isEqualTo(4_500L);
+            assertThat(e.cantidad()).isEqualTo(40);
+        });
+        assertThat(resultado.desenlace()).isEqualTo(ResultadoComando.Desenlace.FUERA_DE_BANDA);
+        assertThat(libro.pendienteDe(fuera.ordenId())).isEqualTo(40);
+        assertThat(libro.mejorVenta()).isEmpty();
+    }
+
+    @Test
+    void sinContraparteDentroDeLaBandaUnaOrdenAMercadoSeCancelaSinEjecutarNada() {
+        libro.procesar(ventaLimite("beto", 5_600, 100));
+        libro.procesar(ventaLimite("cara", 6_000, 100));
+
+        ResultadoComando resultado = libro.procesar(aMercado("ana", Lado.COMPRA, 10));
+
+        assertThat(resultado.ejecuciones()).isEmpty();
+        assertThat(resultado.desenlace()).isEqualTo(ResultadoComando.Desenlace.FUERA_DE_BANDA);
+        assertThat(libro.mejorVenta()).contains(5_600L);
+    }
+
+    @Test
+    void laBandaSeRedondeaHaciaAdentro() {
+        // Referencia 5.005: el máximo es floor(5.505,5) = 5.505
+        libro.procesar(ventaLimite("beto", 5_505, 10));
+        libro.procesar(ventaLimite("cara", 5_506, 10));
+
+        ResultadoComando resultado = libro.procesar(aMercado("ana", Lado.COMPRA, 5_005L, 20));
+
+        assertThat(resultado.ejecuciones()).singleElement().extracting(Ejecucion::precio).isEqualTo(5_505L);
+        assertThat(resultado.desenlace()).isEqualTo(ResultadoComando.Desenlace.FUERA_DE_BANDA);
+    }
+
+    @Test
+    void unaOrdenAMercadoSinReferenciaSeCancelaSinTocarElLibro() {
+        ComandoOrden venta = ventaLimite("beto", 5_000, 100);
+        libro.procesar(venta);
+
+        ResultadoComando resultado = libro.procesar(aMercado("ana", Lado.COMPRA, null, 10));
+
+        assertThat(resultado.desenlace()).isEqualTo(ResultadoComando.Desenlace.SIN_REFERENCIA);
+        assertThat(resultado.ejecuciones()).isEmpty();
+        assertThat(libro.pendienteDe(venta.ordenId())).isEqualTo(100);
+    }
+
+    @Test
+    void unaReferenciaInvalidaTambienCancelaLaOrdenEnVezDeTrabarElMotor() {
+        libro.procesar(ventaLimite("beto", 5_000, 100));
+
+        assertThat(libro.procesar(aMercado("ana", Lado.COMPRA, 0L, 10)).desenlace())
+                .isEqualTo(ResultadoComando.Desenlace.SIN_REFERENCIA);
+        // Tan grande que su banda no cabe en un long
+        assertThat(libro.procesar(aMercado("ana", Lado.COMPRA, Long.MAX_VALUE / 2, 10)).desenlace())
+                .isEqualTo(ResultadoComando.Desenlace.SIN_REFERENCIA);
+        assertThat(libro.mejorVenta()).contains(5_000L);
+    }
+
+    @Test
+    void unaOrdenLimiteNoUsaLaReferencia() {
+        libro.procesar(ventaLimite("beto", 6_000, 10));
+
+        // Una LIMITE de 6.000 con referencia 5.000 cruza: su límite lo validó order-service al crearla
+        ComandoOrden compra = ComandoOrden.nueva("ana", "ANDX", Lado.COMPRA, TipoOrden.LIMITE, 6_000L, 5_000L, 10);
+
+        assertThat(libro.procesar(compra).desenlace()).isEqualTo(ResultadoComando.Desenlace.EJECUTADA);
+    }
+
+    @Test
     void cancelarDiceCuantoSeAlcanzoAEjecutar() {
         ComandoOrden venta = ventaLimite("beto", 5_000, 100);
         libro.procesar(venta);
@@ -272,12 +366,18 @@ class LibroOrdenesTest {
         return ComandoOrden.nueva(usuario, "ANDX", Lado.VENTA, TipoOrden.LIMITE, precio, cantidad);
     }
 
+    /** Una orden a mercado con referencia 5.000: su banda va de 4.500 a 5.500. */
     private static ComandoOrden aMercado(String usuario, Lado lado, int cantidad) {
-        return ComandoOrden.nueva(usuario, "ANDX", lado, TipoOrden.MERCADO, null, cantidad);
+        return aMercado(usuario, lado, 5_000L, cantidad);
+    }
+
+    private static ComandoOrden aMercado(String usuario, Lado lado, Long referencia, int cantidad) {
+        return ComandoOrden.nueva(usuario, "ANDX", lado, TipoOrden.MERCADO, null, referencia, cantidad);
     }
 
     private static ComandoOrden cancelar(ComandoOrden orden) {
         return new ComandoOrden(UUID.randomUUID(), AccionComando.CANCELAR, orden.ordenId(), orden.usuarioId(),
-                orden.simbolo(), orden.lado(), orden.tipo(), orden.precioLimite(), orden.cantidad(), Instant.now());
+                orden.simbolo(), orden.lado(), orden.tipo(), orden.precioLimite(), orden.precioReferencia(), orden.cantidad(),
+                Instant.now());
     }
 }

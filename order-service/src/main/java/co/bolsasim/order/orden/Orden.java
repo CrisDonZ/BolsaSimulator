@@ -46,6 +46,14 @@ public class Orden implements Persistable<UUID> {
     @Column(name = "precio_limite")
     private Long precioLimite;
 
+    /**
+     * El precio de referencia del instrumento cuando se creó la orden, el mismo con el que se reservó. Va en el
+     * comando NUEVA: el motor ejecuta una orden a MERCADO solo dentro de ±10 % de él (RF-26). Null en las órdenes de
+     * antes de HU-07.
+     */
+    @Column(name = "precio_referencia", updatable = false)
+    private Long precioReferencia;
+
     private int cantidad;
 
     @Column(name = "cantidad_ejecutada")
@@ -90,6 +98,7 @@ public class Orden implements Persistable<UUID> {
         this.lado = comando.lado();
         this.tipo = comando.tipo();
         this.precioLimite = comando.precioLimite();
+        this.precioReferencia = comando.precioReferencia();
         this.cantidad = comando.cantidad();
         this.cantidadEjecutada = 0;
         this.estado = EstadoOrden.PENDIENTE;
@@ -157,7 +166,8 @@ public class Orden implements Persistable<UUID> {
         if (estado != EstadoOrden.PENDIENTE) {
             throw new EventoImposibleException("la reserva se aceptó, pero la orden ya está " + estado);
         }
-        return ComandoOrden.paraOrden(id, usuarioId.toString(), simbolo, lado, tipo, precioLimite, cantidad);
+        return ComandoOrden.paraOrden(id, usuarioId.toString(), simbolo, lado, tipo, precioLimite, precioReferencia,
+                cantidad);
     }
 
     /**
@@ -217,6 +227,10 @@ public class Orden implements Persistable<UUID> {
 
     public Long getPrecioLimite() {
         return precioLimite;
+    }
+
+    public Long getPrecioReferencia() {
+        return precioReferencia;
     }
 
     public int getCantidad() {

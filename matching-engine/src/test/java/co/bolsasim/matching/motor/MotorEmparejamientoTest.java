@@ -78,6 +78,7 @@ class MotorEmparejamientoTest {
 
     private static ComandoOrden cancelar(ComandoOrden orden) {
         return new ComandoOrden(UUID.randomUUID(), AccionComando.CANCELAR, orden.ordenId(), orden.usuarioId(),
-                orden.simbolo(), orden.lado(), orden.tipo(), orden.precioLimite(), orden.cantidad(), Instant.now());
+                orden.simbolo(), orden.lado(), orden.tipo(), orden.precioLimite(), orden.precioReferencia(), orden.cantidad(),
+                Instant.now());
     }
 }

@@ -435,3 +435,34 @@ Content-Type: application/json
 ###     o que ya terminó responde 409; la de otro usuario, 404.
 POST {{gateway}}/api/ordenes/{{ordenId}}/cancelacion
 Authorization: Bearer {{token}}
+
+### 43. Compra a mercado dentro de la banda (HU-07, RF-26): con referencia 5.000 reserva 10 × 5.000 × 1,10 = 55.000
+###     y compra a los mejores precios hasta 5.500, nunca más caro. Si lo que queda está fuera de la banda, lo no
+###     ejecutado se cancela, motivo "Sin contraparte dentro de ±10 % de 5.000 COP: ...", y la 35 muestra la reserva
+###     sobrante devuelta. La venta fuera de la banda sigue en el libro.
+POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-43-cambia-esta-clave
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "simbolo": "ANDX",
+  "lado": "COMPRA",
+  "tipo": "MERCADO",
+  "cantidad": 10
+}
+
+### 44. El precio de referencia no lo elige el cliente -> 400 "La orden trae un campo que no existe": lo pone
+###     order-service con el último precio del instrumento.
+POST {{gateway}}/api/ordenes
+Idempotency-Key: peticion-44-cambia-esta-clave
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "simbolo": "ANDX",
+  "lado": "COMPRA",
+  "tipo": "MERCADO",
+  "precioReferencia": 1,
+  "cantidad": 10
+}

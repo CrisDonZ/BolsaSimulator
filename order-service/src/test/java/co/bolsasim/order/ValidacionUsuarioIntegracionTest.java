@@ -153,7 +153,9 @@ class ValidacionUsuarioIntegracionTest {
         assertThat(comando.key()).isEqualTo("ANDX");
         assertThat(new String(comando.headers().lastHeader("__TypeId__").value(), StandardCharsets.UTF_8))
                 .isEqualTo(ComandoOrden.class.getName());
-        assertThat(comando.value()).contains("\"usuarioId\":\"" + usuarioId + "\"", "\"accion\":\"NUEVA\"");
+        // Con la misma referencia con la que se reservó: el motor corta con ella la banda de una orden a mercado
+        assertThat(comando.value()).contains("\"usuarioId\":\"" + usuarioId + "\"", "\"accion\":\"NUEVA\"",
+                "\"precioReferencia\":5000");
     }
 
     @Test
