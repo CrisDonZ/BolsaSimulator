@@ -33,3 +33,39 @@ jobs:
       - name: Logs de los servicios
         if: failure()
         run: tail -n 100 target/integracion/*.log || true
+
+  # La aplicación web: corre en paralelo con el backend, y los dos tienen que quedar en verde (RNF-39)
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Node 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # npm ci instala exactamente lo que dice package-lock.json, sin actualizar nada
+      - name: Instalar dependencias
+        run: npm ci
+
+      # Falla si una dependencia tiene una vulnerabilidad alta o crítica conocida
+      - name: Auditar dependencias
+        run: npm audit --audit-level=high
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tipos
+        run: npm run typecheck
+
+      - name: Pruebas
+        run: npm test
+
+      - name: Build
+        run: npm run build

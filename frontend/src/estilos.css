@@ -1,0 +1,306 @@
+/*
+ * Colores con contraste WCAG 2.1 AA (RNF-42): el texto normal tiene al menos 4,5:1 contra su fondo. Compra y venta, y
+ * activo y suspendido, nunca se distinguen solo por el color: siempre llevan su texto.
+ */
+:root {
+  color-scheme: light;
+  --fondo: #f6f7f9;
+  --superficie: #ffffff;
+  --texto: #1a1f2b;
+  --texto-suave: #4a5263;
+  --borde: #c9ced8;
+  --primario: #1d4ed8;
+  --primario-texto: #ffffff;
+  --error: #b42318;
+  --error-fondo: #fdecea;
+  --exito: #166534;
+  --exito-fondo: #e7f6ec;
+  --aviso: #8a4b00;
+  --aviso-fondo: #fff4e0;
+  --foco: #f59e0b;
+  --radio: 8px;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  line-height: 1.5;
+  color: var(--texto);
+  background: var(--fondo);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --fondo: #11151c;
+    --superficie: #1b212b;
+    --texto: #eef1f6;
+    --texto-suave: #b4bccb;
+    --borde: #3a4352;
+    --primario: #7aa2ff;
+    --primario-texto: #0b1020;
+    --error: #ffb4ab;
+    --error-fondo: #3b1714;
+    --exito: #86efac;
+    --exito-fondo: #12301d;
+    --aviso: #ffd08a;
+    --aviso-fondo: #3a2a0f;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--fondo);
+}
+
+:focus-visible {
+  outline: 3px solid var(--foco);
+  outline-offset: 2px;
+}
+
+.saltar {
+  position: absolute;
+  left: -9999px;
+}
+
+.saltar:focus {
+  left: 16px;
+  top: 8px;
+  padding: 8px 12px;
+  background: var(--superficie);
+  z-index: 10;
+}
+
+.plantilla {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.encabezado {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--superficie);
+  border-bottom: 1px solid var(--borde);
+}
+
+.marca {
+  font-weight: 700;
+  font-size: 1.25rem;
+  color: var(--texto);
+  text-decoration: none;
+}
+
+.encabezado-usuario {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.rol {
+  color: var(--texto-suave);
+}
+
+.contenido {
+  flex: 1;
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+.aviso-legal {
+  padding: 12px 16px;
+  background: var(--aviso-fondo);
+  color: var(--aviso);
+  border-top: 1px solid var(--borde);
+  text-align: center;
+  font-size: 0.9rem;
+}
+
+.aviso-legal p {
+  margin: 0;
+}
+
+.tarjeta {
+  max-width: 440px;
+  margin: 0 auto;
+  padding: 24px;
+  background: var(--superficie);
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+}
+
+h1 {
+  margin-top: 0;
+  font-size: 1.6rem;
+}
+
+a {
+  color: var(--primario);
+}
+
+.campo {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 16px;
+}
+
+.campo label {
+  font-weight: 600;
+}
+
+.campo input {
+  font: inherit;
+  padding: 10px 12px;
+  min-height: 44px;
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  background: var(--superficie);
+  color: var(--texto);
+}
+
+.campo input[aria-invalid='true'] {
+  border-color: var(--error);
+}
+
+.campo-ayuda {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--texto-suave);
+}
+
+.campo-error {
+  margin: 0;
+  min-height: 1.2em;
+  font-size: 0.9rem;
+  color: var(--error);
+}
+
+.casilla {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.casilla input {
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+button {
+  font: inherit;
+  font-weight: 600;
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 1px solid var(--primario);
+  border-radius: var(--radio);
+  background: var(--primario);
+  color: var(--primario-texto);
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.boton-secundario {
+  background: transparent;
+  color: var(--primario);
+}
+
+form button[type='submit'] {
+  width: 100%;
+}
+
+.alerta {
+  padding: 12px;
+  margin: 0 0 16px;
+  border-radius: var(--radio);
+  background: var(--error-fondo);
+  color: var(--error);
+}
+
+.alerta p {
+  margin: 0 0 8px;
+}
+
+.cargando,
+.vacio {
+  color: var(--texto-suave);
+}
+
+.buscador {
+  max-width: 360px;
+}
+
+.tabla-contenedor {
+  overflow-x: auto;
+  background: var(--superficie);
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+}
+
+.tabla {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.tabla caption {
+  text-align: left;
+  padding: 12px;
+  color: var(--texto-suave);
+}
+
+.tabla th,
+.tabla td {
+  padding: 10px 12px;
+  text-align: left;
+  border-top: 1px solid var(--borde);
+}
+
+.tabla .numero {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.etiqueta {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.etiqueta.activo {
+  background: var(--exito-fondo);
+  color: var(--exito);
+}
+
+.etiqueta.suspendido {
+  background: var(--aviso-fondo);
+  color: var(--aviso);
+}
+
+/* Desde 360 px de ancho (RNF-41): en un celular el sector se esconde para que la tabla quepa */
+@media (max-width: 560px) {
+  .ocultable {
+    display: none;
+  }
+
+  .tarjeta {
+    padding: 16px;
+  }
+}
