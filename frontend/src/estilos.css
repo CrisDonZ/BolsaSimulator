@@ -300,6 +300,23 @@ form button[type='submit'] {
     display: none;
   }
 
+  .contenido {
+    padding: 16px 12px;
+  }
+
+  .tabla {
+    font-size: 0.9rem;
+  }
+
+  .tabla th,
+  .tabla td {
+    padding: 8px 6px;
+  }
+
+  .etiqueta {
+    padding: 2px 6px;
+  }
+
   .tarjeta {
     padding: 16px;
   }
