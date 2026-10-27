@@ -70,22 +70,21 @@ public class RepositorioCuentas {
     }
 
     /**
-     * Paga una compra: sale del reservado lo que cubre la reserva y del disponible lo que no alcanzó a cubrir (solo
-     * en una compra a mercado que se ejecuta por encima de lo reservado), y devuelve al disponible lo que se
-     * libera.
+     * Paga una compra con su reserva: lo pagado sale del reservado y lo liberado vuelve al disponible. Nunca toca el
+     * disponible para pagar: una compra se paga solo con lo que reservó.
      *
-     * @return false si el disponible no alcanza para la parte que no cubría la reserva; la cuenta no cambia
+     * @return false si el reservado de la cuenta no alcanza (no debería pasar: cada reserva está dentro de él); la
+     *         cuenta no cambia
      */
-    public boolean pagarYLiberar(UUID cuentaId, long delReservado, long delDisponible, long liberado, Instant ahora) {
+    public boolean pagarYLiberar(UUID cuentaId, long pagado, long liberado, Instant ahora) {
         return jdbc.sql("""
                         UPDATE cuenta
-                        SET saldo_reservado = saldo_reservado - :delReservado - :liberado,
-                            saldo_disponible = saldo_disponible - :delDisponible + :liberado,
+                        SET saldo_reservado = saldo_reservado - :pagado - :liberado,
+                            saldo_disponible = saldo_disponible + :liberado,
                             version = version + 1, actualizado_en = :ahora
-                        WHERE id = :id AND saldo_disponible + :liberado >= :delDisponible""")
+                        WHERE id = :id AND saldo_reservado >= :pagado + :liberado""")
                 .param("id", cuentaId)
-                .param("delReservado", delReservado)
-                .param("delDisponible", delDisponible)
+                .param("pagado", pagado)
                 .param("liberado", liberado)
                 .param("ahora", ahora.atOffset(ZoneOffset.UTC))
                 .update() == 1;

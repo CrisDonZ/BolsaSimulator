@@ -17,8 +17,10 @@
 # acciones emitidas del instrumento nuevo (RF-59); una venta de quien no tiene acciones queda RECHAZADA. Al final
 # se comprueba por la API que el creador cobró lo que pagó el comprador (HU-06). Después se cancelan dos órdenes
 # (HU-08): una compra que no cruzó devuelve todo su dinero, y una ejecutada en parte queda CANCELADA con lo
-# ejecutado y devuelve solo lo pendiente. Por último renueva el token y comprueba que, después de cerrar sesión, el
-# token de refresco ya no sirve.
+# ejecutado y devuelve solo lo pendiente. Luego compra a precio de mercado (HU-07): una compra se ejecuta dentro de
+# la banda de ±10 % de su referencia, deja sin tocar una venta fuera de ella y libera lo que no gastó; otra sin
+# contraparte en la banda se cancela sin ejecutar nada. Por último renueva el token y comprueba que, después de
+# cerrar sesión, el token de refresco ya no sirve.
 #
 # Requisitos: Docker abierto, los jars compilados (./mvnw -B verify) y los servicios detenidos
 # (la prueba arranca los suyos en los puertos 8080 a 8084).
@@ -457,7 +459,62 @@ esperar_respuesta "Cuenta después de cancelar la parcial" /api/cuenta "$TOKEN" 
 echo "   Compra de 100 ejecutada en 30 y cancelada: CANCELADA con las 30 a 4900; se devolvieron los 343.000 de las"
 echo "   70 pendientes y el saldo queda en 9.313.000"
 
-echo "10. Renovando el token y cerrando sesión..."
+echo "10. Operando a precio de mercado (HU-07)..."
+# La última operación fue a 4900: la banda va de 4410 a 5390. El creador deja una venta en el borde, a 5390
+VENTA_5390="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"VENTA\",\"tipo\":\"LIMITE\",\"precioLimite\":5390,\"cantidad\":20}"
+comprobar "Venta de 20 a 5390 del creador" "$(pedir POST /api/ordenes "$VENTA_5390" "$TOKEN_CREADOR")" 202
+VENTA_5390_ID=$(campo ordenId)
+esperar_respuesta "Venta de 20 a 5390 en el libro" "/api/ordenes/$VENTA_5390_ID" "$TOKEN_CREADOR" '"estado":"ABIERTA"'
+# Una operación a 4410 baja la referencia: la nueva banda va de 3969 a 4851 y la venta a 5390 queda fuera
+VENTA_4410="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"VENTA\",\"tipo\":\"LIMITE\",\"precioLimite\":4410,\"cantidad\":10}"
+comprobar "Venta de 10 a 4410 del creador" "$(pedir POST /api/ordenes "$VENTA_4410" "$TOKEN_CREADOR")" 202
+esperar_respuesta "Venta de 10 a 4410 en el libro" "/api/ordenes/$(campo ordenId)" "$TOKEN_CREADOR" '"estado":"ABIERTA"'
+COMPRA_4410="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"COMPRA\",\"tipo\":\"LIMITE\",\"precioLimite\":4410,\"cantidad\":10}"
+comprobar "Compra de 10 a 4410" "$(pedir POST /api/ordenes "$COMPRA_4410" "$TOKEN")" 202
+esperar_respuesta "Compra de 10 a 4410" "/api/ordenes/$(campo ordenId)" "$TOKEN" '"estado":"EJECUTADA"'
+esperar "ltimo precio de $SIMBOLO: 4410 COP" "$LOGS/order-service.log" 30
+VENTA_4800="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"VENTA\",\"tipo\":\"LIMITE\",\"precioLimite\":4800,\"cantidad\":20}"
+comprobar "Venta de 20 a 4800 del creador" "$(pedir POST /api/ordenes "$VENTA_4800" "$TOKEN_CREADOR")" 202
+esperar_respuesta "Venta de 20 a 4800 en el libro" "/api/ordenes/$(campo ordenId)" "$TOKEN_CREADOR" '"estado":"ABIERTA"'
+esperar_respuesta "Cuenta antes de comprar a mercado" /api/cuenta "$TOKEN" \
+    '"saldoDisponible":9268900,"saldoReservado":0,"saldoTotal":9268900'
+# Reserva ceil(50 × 4410 × 1,10) = 242.550, compra las 20 a 4800 y no toca la de 5390: el resto se cancela
+MERCADO_50="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"COMPRA\",\"tipo\":\"MERCADO\",\"cantidad\":50}"
+comprobar "Compra a mercado de 50" "$(pedir POST /api/ordenes "$MERCADO_50" "$TOKEN")" 202
+MERCADO_50_ID=$(campo ordenId)
+esperar_respuesta "Compra a mercado cortada por la banda" "/api/ordenes/$MERCADO_50_ID" "$TOKEN" \
+    '"cantidadEjecutada":20,"precioPromedio":4800.*"estado":"CANCELADA"'
+grep -q 'Se ejecutaron 20 de 50 acciones; sin más contraparte dentro de ±10 % de 4.410 COP, se canceló lo no ejecutado.' \
+    "$LOGS/respuesta.json"
+# Pagó 96.000 y se liberaron 242.550 − 96.000 = 146.550
+esperar_respuesta "Cuenta después de la compra a mercado" /api/cuenta "$TOKEN" \
+    '"saldoDisponible":9172900,"saldoReservado":0,"saldoTotal":9172900'
+comprobar "Movimientos de la compra a mercado" "$(pedir GET "/api/cuenta/movimientos?tamano=3" "" "$TOKEN")" 200
+grep -q "\"tipo\":\"RESERVA\",\"monto\":-242550,\"simbolo\":\"$SIMBOLO\",\"cantidad\":50,\"referenciaId\":\"$MERCADO_50_ID\"" \
+    "$LOGS/respuesta.json"
+grep -q "\"tipo\":\"LIBERACION\",\"monto\":146550,\"simbolo\":\"$SIMBOLO\",\"cantidad\":null,\"referenciaId\":\"$MERCADO_50_ID\"" \
+    "$LOGS/respuesta.json"
+# La venta fuera de la banda sigue en el libro, sin tocar
+comprobar "La venta a 5390" "$(pedir GET "/api/ordenes/$VENTA_5390_ID" "" "$TOKEN_CREADOR")" 200
+grep -q '"cantidadEjecutada":0,.*"estado":"ABIERTA"' "$LOGS/respuesta.json"
+echo "   Compra a mercado de 50 con referencia 4410: reservó 242.550, compró 20 a 4800, la venta a 5390 quedó fuera"
+echo "   de la banda y en el libro, se canceló el resto y se liberaron 146.550; saldo 9.172.900"
+# Ahora la referencia es 4800 (banda de 4320 a 5280) y solo queda la venta a 5390: no se ejecuta nada
+esperar "ltimo precio de $SIMBOLO: 4800 COP" "$LOGS/order-service.log" 30
+MERCADO_10="{\"simbolo\":\"$SIMBOLO\",\"lado\":\"COMPRA\",\"tipo\":\"MERCADO\",\"cantidad\":10}"
+comprobar "Compra a mercado sin contraparte en la banda" "$(pedir POST /api/ordenes "$MERCADO_10" "$TOKEN")" 202
+esperar_respuesta "Compra a mercado sin contraparte" "/api/ordenes/$(campo ordenId)" "$TOKEN" \
+    '"cantidadEjecutada":0,.*"estado":"CANCELADA"'
+grep -q 'Sin contraparte dentro de ±10 % de 4.800 COP: se canceló la orden sin ejecutar nada.' "$LOGS/respuesta.json"
+esperar_respuesta "Cuenta después de la compra sin contraparte" /api/cuenta "$TOKEN" \
+    '"saldoDisponible":9172900,"saldoReservado":0,"saldoTotal":9172900'
+# La venta a 5390 no se tocó; el creador la retira
+comprobar "Cancelar la venta a 5390" "$(pedir POST "/api/ordenes/$VENTA_5390_ID/cancelacion" "" "$TOKEN_CREADOR")" 202
+esperar_respuesta "Venta a 5390 cancelada" "/api/ordenes/$VENTA_5390_ID" "$TOKEN_CREADOR" \
+    '"cantidadEjecutada":0,.*"estado":"CANCELADA"'
+echo "   Compra a mercado de 10 sin nada dentro de la banda de 4800: CANCELADA sin ejecutar y su reserva devuelta"
+
+echo "11. Renovando el token y cerrando sesión..."
 comprobar "Renovar el token" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 200
 comprobar "Cerrar sesión sin token" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 comprobar "Cerrar sesión directo a auth-service sin token" \
@@ -466,4 +523,4 @@ comprobar "Cerrar sesión" "$(pedir POST /api/auth/logout "{\"tokenRefresco\":\"
 comprobar "Renovar después de cerrar sesión" "$(pedir POST /api/auth/refresh "{\"tokenRefresco\":\"$REFRESCO\"}")" 401
 echo "   Refresco 200, logout sin token 401, logout 204 y refresco revocado 401"
 
-echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, el creador de mercado recibió sus acciones, las órdenes quedaron guardadas, reservaron su saldo o sus acciones, viajaron por Kafka, el motor las ejecutó, portfolio-service liquidó al comprador y al vendedor, y las cancelaciones devolvieron lo pendiente. Logs en $LOGS/"
+echo "OK: todo pasó por el gateway; el usuario se registró, inició sesión, el ADMIN creó un instrumento sin reiniciar nada, el creador de mercado recibió sus acciones, las órdenes quedaron guardadas, reservaron su saldo o sus acciones, viajaron por Kafka, el motor las ejecutó, portfolio-service liquidó al comprador y al vendedor, las cancelaciones devolvieron lo pendiente y las compras a mercado no salieron de la banda de ±10 %. Logs en $LOGS/"

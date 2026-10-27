@@ -1,5 +1,6 @@
 package co.bolsasim.order.servicio;
 
+import co.bolsasim.eventos.BandaPrecio;
 import co.bolsasim.eventos.ComandoOrden;
 import co.bolsasim.eventos.EstadoOrden;
 import co.bolsasim.eventos.SolicitudReserva;
@@ -112,12 +113,16 @@ public class ServicioOrdenes {
         // entonces el mercado está siempre abierto
         long precioDeReferencia = validarPrecioLimite(request, instrumento);
 
+        // La referencia sale del instrumento, nunca de la solicitud: con ella se reserva y el motor corta la banda de
+        // una orden a mercado (RF-26). Se toma una sola vez, aquí; si el precio se mueve antes de que la orden llegue
+        // al motor, la banda sigue midiéndose contra la referencia que cubrió la reserva
         ComandoOrden comando = ComandoOrden.nueva(
                 usuario.toString(),
                 request.simbolo(),
                 request.lado(),
                 request.tipo(),
                 request.precioLimite(),
+                precioDeReferencia,
                 request.cantidad());
 
         // saveAndFlush: el INSERT va antes que el outbox, así el choque con otra solicitud de la misma clave
@@ -192,7 +197,8 @@ public class ServicioOrdenes {
                 .orElseThrow(() -> new OrdenNoEncontradaException(ordenId));
         if (marcada) {
             ComandoOrden comando = ComandoOrden.cancelar(orden.getId(), usuario.toString(), orden.getSimbolo(),
-                    orden.getLado(), orden.getTipo(), orden.getPrecioLimite(), orden.getCantidad());
+                    orden.getLado(), orden.getTipo(), orden.getPrecioLimite(), orden.getPrecioReferencia(),
+                    orden.getCantidad());
             // La misma clave que su NUEVA (el símbolo): la misma partición, después de ella
             outbox.guardar(Topicos.ORDERS_COMMANDS, comando.simbolo(), comando);
             return orden;
@@ -297,11 +303,10 @@ public class ServicioOrdenes {
     /**
      * RF-16: el precio de una orden LIMITE es múltiplo del tick y está a ±10 % del precio de referencia, el de la
      * última operación o, si todavía no hay ninguna, el precio inicial. Los límites cuentan: con referencia 5.000,
-     * 4.500 y 5.500 pasan. Con enteros y sin redondeos: el mínimo es 90 % de la referencia redondeado hacia arriba
-     * y el máximo, 110 % redondeado hacia abajo.
+     * 4.500 y 5.500 pasan. La banda es {@link BandaPrecio}, la misma con la que el motor corta una orden a mercado.
      *
      * @return el precio de referencia, que también va en la solicitud de reserva (una compra a mercado se reserva
-     *         con él)
+     *         con él) y en el comando NUEVA
      */
     private static long validarPrecioLimite(CrearOrdenRequest request, Instrumento instrumento) {
         String simbolo = instrumento.getSimbolo();
@@ -319,8 +324,8 @@ public class ServicioOrdenes {
                     + simbolo + " (" + Pesos.formato(tick) + " COP): usa, por ejemplo, " + Pesos.formato(abajo)
                     + " o " + Pesos.formato(abajo + tick) + ".");
         }
-        long minimo = (referencia * 9 + 9) / 10;
-        long maximo = referencia * 11 / 10;
+        long minimo = BandaPrecio.minimo(referencia);
+        long maximo = BandaPrecio.maximo(referencia);
         if (precio < minimo || precio > maximo) {
             throw new PrecioInvalidoException("El precio " + Pesos.formato(precio) + " está a más de 10 % del último "
                     + "precio de " + simbolo + " (" + Pesos.formato(referencia) + " COP): debe estar entre "

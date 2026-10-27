@@ -128,6 +128,54 @@ class EventosDelComandoTest {
     }
 
     @Test
+    void loQueQuedaFueraDeLaBandaSeCancelaConLaReferenciaEnElMotivo() {
+        procesar(venta("beto", 5_000L, 40));
+        procesar(venta("cara", 5_600L, 100));
+        ComandoOrden aMercado = aMercado("ana", Lado.COMPRA, 100);
+
+        List<Mensaje> mensajes = procesar(aMercado);
+
+        EventoOrden ultimo = (EventoOrden) mensajes.getLast().evento();
+        assertThat(ultimo.ordenId()).isEqualTo(aMercado.ordenId());
+        assertThat(ultimo.estado()).isEqualTo(EstadoOrden.CANCELADA);
+        assertThat(ultimo.cantidadEjecutada()).isEqualTo(40);
+        assertThat(ultimo.motivo()).isEqualTo("Se ejecutaron 40 de 100 acciones; sin más contraparte dentro de "
+                + "±10 % de 5.000 COP, se canceló lo no ejecutado.");
+        // El motivo no dice nada de la otra orden: ni su usuario ni su precio
+        assertThat(ultimo.motivo()).doesNotContain("cara", "5.600");
+    }
+
+    @Test
+    void sinNadaDentroDeLaBandaSeCancelaCompletaConSuMotivo() {
+        procesar(venta("beto", 5_600L, 100));
+
+        List<Mensaje> mensajes = procesar(aMercado("ana", Lado.COMPRA, 10));
+
+        assertThat(mensajes).singleElement().satisfies(mensaje -> {
+            EventoOrden evento = (EventoOrden) mensaje.evento();
+            assertThat(evento.estado()).isEqualTo(EstadoOrden.CANCELADA);
+            assertThat(evento.cantidadEjecutada()).isZero();
+            assertThat(evento.motivo())
+                    .isEqualTo("Sin contraparte dentro de ±10 % de 5.000 COP: se canceló la orden sin ejecutar nada.");
+        });
+    }
+
+    @Test
+    void unaOrdenAMercadoSinReferenciaSeCancelaCompletaYNoSaleNingunaOperacion() {
+        procesar(venta("beto", 5_000L, 100));
+
+        List<Mensaje> mensajes = procesar(aMercado("ana", Lado.COMPRA, null, 10));
+
+        assertThat(mensajes).singleElement().satisfies(mensaje -> {
+            assertThat(mensaje.topico()).isEqualTo(Topicos.ORDERS_EVENTS);
+            EventoOrden evento = (EventoOrden) mensaje.evento();
+            assertThat(evento.estado()).isEqualTo(EstadoOrden.CANCELADA);
+            assertThat(evento.cantidadEjecutada()).isZero();
+            assertThat(evento.motivo()).isEqualTo(EventosDelComando.SIN_PRECIO_DE_REFERENCIA);
+        });
+    }
+
+    @Test
     void cancelarUnaOrdenDelLibroPublicaCanceladaConLoQueSeEjecuto() {
         ComandoOrden venta = venta("beto", 5_000L, 100);
         procesar(venta);
@@ -182,12 +230,18 @@ class EventosDelComandoTest {
         return ComandoOrden.nueva(usuario, "ANDX", Lado.VENTA, TipoOrden.LIMITE, precio, cantidad);
     }
 
+    /** Con referencia 5.000: su banda va de 4.500 a 5.500. */
     private static ComandoOrden aMercado(String usuario, Lado lado, int cantidad) {
-        return ComandoOrden.nueva(usuario, "ANDX", lado, TipoOrden.MERCADO, null, cantidad);
+        return aMercado(usuario, lado, 5_000L, cantidad);
+    }
+
+    private static ComandoOrden aMercado(String usuario, Lado lado, Long referencia, int cantidad) {
+        return ComandoOrden.nueva(usuario, "ANDX", lado, TipoOrden.MERCADO, null, referencia, cantidad);
     }
 
     private static ComandoOrden cancelar(ComandoOrden orden) {
         return new ComandoOrden(UUID.randomUUID(), AccionComando.CANCELAR, orden.ordenId(), orden.usuarioId(),
-                orden.simbolo(), orden.lado(), orden.tipo(), orden.precioLimite(), orden.cantidad(), Instant.now());
+                orden.simbolo(), orden.lado(), orden.tipo(), orden.precioLimite(), orden.precioReferencia(), orden.cantidad(),
+                Instant.now());
     }
 }

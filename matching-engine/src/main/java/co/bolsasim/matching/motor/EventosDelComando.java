@@ -21,7 +21,8 @@ import java.util.UUID;
  *
  * <p>Por cada ejecución sale una operación y un evento para cada una de las dos órdenes: primero la que estaba
  * en el libro, después la del comando. Al final, si hace falta, un evento más de la orden del comando: ABIERTA
- * si entró al libro sin cruzar, o CANCELADA si le sobró algo a una orden a mercado o si el comando era CANCELAR.
+ * si entró al libro sin cruzar, o CANCELADA si le sobró algo a una orden a mercado (se acabó la contraparte o la que
+ * queda está fuera de la banda de ±10 %), si llegó a mercado sin precio de referencia o si el comando era CANCELAR.
  *
  * <p>Los ids salen del comandoId y de la posición del mensaje dentro del comando: procesar otra vez el mismo
  * comando da los mismos ids, y quien consume los eventos reconoce los repetidos (RNF-09).
@@ -29,6 +30,9 @@ import java.util.UUID;
 public final class EventosDelComando {
 
     static final String CANCELADA_POR_EL_USUARIO = "Cancelada por el usuario.";
+
+    static final String SIN_PRECIO_DE_REFERENCIA = "La orden a mercado llegó sin precio de referencia: se canceló sin "
+            + "ejecutar nada. Envíala de nuevo.";
 
     private EventosDelComando() {
     }
@@ -60,6 +64,10 @@ public final class EventosDelComando {
             }
             case SOBRANTE_CANCELADO -> armador.sinEjecucion(comando.ordenId(), comando.usuarioId(), EstadoOrden.CANCELADA,
                     comando.cantidad(), ejecutada, motivoDelSobrante(comando, ejecutada));
+            case FUERA_DE_BANDA -> armador.sinEjecucion(comando.ordenId(), comando.usuarioId(), EstadoOrden.CANCELADA,
+                    comando.cantidad(), ejecutada, motivoFueraDeBanda(comando, ejecutada));
+            case SIN_REFERENCIA -> armador.sinEjecucion(comando.ordenId(), comando.usuarioId(), EstadoOrden.CANCELADA,
+                    comando.cantidad(), 0, SIN_PRECIO_DE_REFERENCIA);
             case CANCELADA -> {
                 ResultadoComando.OrdenCancelada cancelada = resultado.cancelada();
                 armador.sinEjecucion(cancelada.ordenId(), cancelada.usuarioId(), EstadoOrden.CANCELADA, cancelada.cantidad(),
@@ -80,6 +88,19 @@ public final class EventosDelComando {
         }
         return "Se ejecutaron " + ejecutada + " de " + comando.cantidad() + " acciones; el resto se canceló porque "
                 + "no había más órdenes de " + contraparte + ".";
+    }
+
+    /**
+     * RF-26: lo que no se ejecuta dentro de la banda de ±10 % se cancela. Dice la referencia y no quién está fuera de
+     * la banda: el motivo no revela nada de otras órdenes, salvo que existe una a un precio que no se aceptó.
+     */
+    static String motivoFueraDeBanda(ComandoOrden comando, int ejecutada) {
+        String referencia = Pesos.formato(comando.precioReferencia());
+        if (ejecutada == 0) {
+            return "Sin contraparte dentro de ±10 % de " + referencia + " COP: se canceló la orden sin ejecutar nada.";
+        }
+        return "Se ejecutaron " + ejecutada + " de " + comando.cantidad() + " acciones; sin más contraparte dentro de "
+                + "±10 % de " + referencia + " COP, se canceló lo no ejecutado.";
     }
 
     /** Arma los mensajes de un comando en orden, cada uno con su id determinista. */

@@ -1,5 +1,6 @@
 package co.bolsasim.matching.libro;
 
+import co.bolsasim.eventos.BandaPrecio;
 import co.bolsasim.eventos.ComandoOrden;
 import co.bolsasim.eventos.Lado;
 import co.bolsasim.eventos.TipoOrden;
@@ -10,6 +11,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.TreeMap;
 import java.util.UUID;
 
@@ -22,7 +24,8 @@ import java.util.UUID;
  *   <li>Tiempo: a igual precio, se atiende primero la orden que llegó antes.</li>
  *   <li>El precio de la ejecución es el de la orden que ya estaba esperando en el libro.</li>
  *   <li>LIMITE: lo que no se ejecuta queda esperando en el libro.</li>
- *   <li>MERCADO: se ejecuta contra lo disponible; lo que sobra se descarta, nunca queda en el libro.</li>
+ *   <li>MERCADO: se ejecuta contra lo disponible dentro de ±10 % de su precio de referencia (RF-26); lo que sobra
+ *       se descarta, nunca queda en el libro. Sin precio de referencia no se ejecuta.</li>
  * </ul>
  *
  * <p>No es seguro para varios hilos: quien lo use debe procesar un comando a la vez.
@@ -76,13 +79,24 @@ public class LibroOrdenes {
     }
 
     private ResultadoComando agregar(ComandoOrden comando) {
+        OptionalLong limiteValido = limiteDelCruce(comando);
+        if (limiteValido.isEmpty()) {
+            // Falla cerrada: sin referencia no hay banda, y una orden a mercado sin banda podría gastar más de lo
+            // reservado
+            return new ResultadoComando(List.of(), ResultadoComando.Desenlace.SIN_REFERENCIA, null);
+        }
+        long limite = limiteValido.getAsLong();
         TreeMap<Long, ArrayDeque<OrdenEnLibro>> contraparte = comando.lado() == Lado.COMPRA ? ventas : compras;
         List<Ejecucion> ejecuciones = new ArrayList<>();
         int pendiente = comando.cantidad();
+        boolean cortadaPorLaBanda = false;
 
         while (pendiente > 0 && !contraparte.isEmpty()) {
             long mejorPrecio = contraparte.firstKey();
-            if (!cruza(comando, mejorPrecio)) {
+            // El libro está ordenado por precio: si el mejor no cruza, ninguno de los que siguen cruza. El costo es
+            // el de los niveles que se ejecutan, no el del tamaño del libro
+            if (!cruza(comando.lado(), limite, mejorPrecio)) {
+                cortadaPorLaBanda = comando.tipo() == TipoOrden.MERCADO;
                 break;
             }
 
@@ -111,19 +125,40 @@ public class LibroOrdenes {
             desenlace = ResultadoComando.Desenlace.EN_LIBRO;
         } else {
             // RF-26: lo que no se ejecuta de una orden a mercado se cancela; nunca queda en el libro
-            desenlace = ResultadoComando.Desenlace.SOBRANTE_CANCELADO;
+            desenlace = cortadaPorLaBanda
+                    ? ResultadoComando.Desenlace.FUERA_DE_BANDA
+                    : ResultadoComando.Desenlace.SOBRANTE_CANCELADO;
         }
         return new ResultadoComando(List.copyOf(ejecuciones), desenlace, null);
     }
 
-    /** ¿La orden nueva acepta el precio de la contraparte? Una orden a MERCADO acepta cualquiera. */
-    private static boolean cruza(ComandoOrden comando, long precioContraparte) {
-        if (comando.tipo() == TipoOrden.MERCADO) {
-            return true;
+    /**
+     * El peor precio que la orden nueva acepta. LIMITE: su precio límite. MERCADO (RF-26): una compra, hasta el máximo
+     * de la banda de su referencia; una venta, desde el mínimo.
+     *
+     * @return vacío si es una orden a MERCADO sin una referencia válida (no viene, no es positiva o es tan grande que
+     *         la banda no cabe en un long): un comando así no debe trabar la partición reintentándose
+     */
+    private static OptionalLong limiteDelCruce(ComandoOrden comando) {
+        if (comando.tipo() == TipoOrden.LIMITE) {
+            return OptionalLong.of(comando.precioLimite());
         }
-        return comando.lado() == Lado.COMPRA
-                ? comando.precioLimite() >= precioContraparte
-                : comando.precioLimite() <= precioContraparte;
+        Long referencia = comando.precioReferencia();
+        if (referencia == null || referencia <= 0) {
+            return OptionalLong.empty();
+        }
+        try {
+            return OptionalLong.of(comando.lado() == Lado.COMPRA
+                    ? BandaPrecio.maximo(referencia)
+                    : BandaPrecio.minimo(referencia));
+        } catch (ArithmeticException e) {
+            return OptionalLong.empty();
+        }
+    }
+
+    /** ¿La orden nueva acepta el precio de la contraparte? Los límites cuentan. */
+    private static boolean cruza(Lado lado, long limite, long precioContraparte) {
+        return lado == Lado.COMPRA ? precioContraparte <= limite : precioContraparte >= limite;
     }
 
     /** @param ejecutadaNueva lo ejecutado de la orden nueva, contando esta ejecución */

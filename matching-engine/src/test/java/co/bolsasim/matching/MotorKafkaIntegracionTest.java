@@ -11,6 +11,7 @@ import co.bolsasim.eventos.Lado;
 import co.bolsasim.eventos.OperacionEjecutada;
 import co.bolsasim.eventos.TipoOrden;
 import co.bolsasim.eventos.Topicos;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -104,6 +105,56 @@ class MotorKafkaIntegracionTest {
         // La operación de la compra de 40 también se reenvía con el mismo id: dos operaciones distintas, no tres
         List<OperacionEjecutada> operaciones = leer(Topicos.TRADES_EXECUTED, OperacionEjecutada.class, simbolo, 3);
         assertThat(operaciones.stream().map(OperacionEjecutada::operacionId).distinct()).hasSize(2);
+    }
+
+    @Test
+    void unaCompraAMercadoSeDetieneEnElBordeDeLaBandaYCancelaElResto() {
+        String simbolo = "TXC";
+        ComandoOrden dentro = ComandoOrden.nueva("beto", simbolo, Lado.VENTA, TipoOrden.LIMITE, 5_500L, 30);
+        ComandoOrden fuera = ComandoOrden.nueva("cara", simbolo, Lado.VENTA, TipoOrden.LIMITE, 5_510L, 30);
+        ComandoOrden compra = ComandoOrden.nueva("ana", simbolo, Lado.COMPRA, TipoOrden.MERCADO, null, 5_000L, 100);
+
+        enviar(dentro, fuera, compra);
+
+        // Dos ABIERTA, la ejecución a 5.500 (un evento por orden) y la CANCELADA de la compra con lo que ejecutó
+        List<EventoOrden> eventos = leer(Topicos.ORDERS_EVENTS, EventoOrden.class, simbolo, 5);
+        assertThat(eventos.getLast()).satisfies(deLaCompra -> {
+            assertThat(deLaCompra.ordenId()).isEqualTo(compra.ordenId());
+            assertThat(deLaCompra.estado()).isEqualTo(EstadoOrden.CANCELADA);
+            assertThat(deLaCompra.cantidadEjecutada()).isEqualTo(30);
+        });
+        assertThat(leer(Topicos.TRADES_EXECUTED, OperacionEjecutada.class, simbolo, 1))
+                .singleElement().extracting(OperacionEjecutada::precio).isEqualTo(5_500L);
+    }
+
+    @Test
+    void unComandoAMercadoConElFormatoDeAntesSinReferenciaSeCancelaSinEjecutarse() {
+        String simbolo = "TXD";
+        enviar(ComandoOrden.nueva("beto", simbolo, Lado.VENTA, TipoOrden.LIMITE, 5_000L, 100));
+        // El JSON que publicaba order-service antes de HU-07: sin el campo precioReferencia
+        UUID ordenId = UUID.randomUUID();
+        String antiguo = """
+                {"comandoId":"%s","accion":"NUEVA","ordenId":"%s","usuarioId":"ana","simbolo":"%s","lado":"COMPRA",\
+                "tipo":"MERCADO","precioLimite":null,"cantidad":10,"enviadoEn":"2026-10-20T15:00:00Z"}"""
+                .formatted(UUID.randomUUID(), ordenId, simbolo);
+        enviarJson(simbolo, antiguo);
+
+        List<EventoOrden> eventos = leer(Topicos.ORDERS_EVENTS, EventoOrden.class, simbolo, 2);
+        assertThat(eventos.getLast()).satisfies(deLaCompra -> {
+            assertThat(deLaCompra.ordenId()).isEqualTo(ordenId);
+            assertThat(deLaCompra.estado()).isEqualTo(EstadoOrden.CANCELADA);
+            assertThat(deLaCompra.cantidadEjecutada()).isZero();
+        });
+    }
+
+    private static void enviarJson(String clave, String json) {
+        Map<String, Object> configuracion = Map.of(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers());
+        try (var productor = new KafkaProducer<>(configuracion, new StringSerializer(), new StringSerializer())) {
+            var registro = new ProducerRecord<>(Topicos.ORDERS_COMMANDS, clave, json);
+            // El header con el que el deserializador sabe la clase, como lo pone JacksonJsonSerializer
+            registro.headers().add("__TypeId__", ComandoOrden.class.getName().getBytes(StandardCharsets.UTF_8));
+            productor.send(registro);
+        }
     }
 
     private static void enviar(ComandoOrden... comandos) {

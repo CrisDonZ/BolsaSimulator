@@ -11,16 +11,20 @@ import java.util.UUID;
  * <p>Es un {@code record}: inmutable, con constructor, getters, equals y hashCode generados.
  * Un evento describe algo que ya se decidió, por eso no se modifica después de creado.
  *
- * @param comandoId    identificador único del mensaje (sirve para detectar duplicados)
- * @param accion       NUEVA o CANCELAR
- * @param ordenId      orden a la que se refiere el comando
- * @param usuarioId    quién envía la orden
- * @param simbolo      acción que se negocia, en mayúsculas (ej. ANDX)
- * @param lado         COMPRA o VENTA
- * @param tipo         MERCADO o LIMITE
- * @param precioLimite precio en COP; null si la orden es a MERCADO
- * @param cantidad     número de acciones, mayor que cero
- * @param enviadoEn    momento en que se publicó
+ * @param comandoId        identificador único del mensaje (sirve para detectar duplicados)
+ * @param accion           NUEVA o CANCELAR
+ * @param ordenId          orden a la que se refiere el comando
+ * @param usuarioId        quién envía la orden
+ * @param simbolo          acción que se negocia, en mayúsculas (ej. ANDX)
+ * @param lado             COMPRA o VENTA
+ * @param tipo             MERCADO o LIMITE
+ * @param precioLimite     precio en COP; null si la orden es a MERCADO
+ * @param precioReferencia precio de referencia del instrumento en COP cuando se creó la orden, el mismo con el que
+ *                         se reservó: el motor ejecuta una orden a MERCADO solo dentro de su {@link BandaPrecio}
+ *                         (RF-26). Lo pone order-service, nunca el cliente. Null en los comandos de antes de HU-07: el
+ *                         motor cancela una orden a MERCADO sin él en vez de ejecutarla sin límite
+ * @param cantidad         número de acciones, mayor que cero
+ * @param enviadoEn        momento en que se publicó
  */
 public record ComandoOrden(
         UUID comandoId,
@@ -31,12 +35,19 @@ public record ComandoOrden(
         Lado lado,
         TipoOrden tipo,
         Long precioLimite,
+        Long precioReferencia,
         int cantidad,
         Instant enviadoEn) {
 
-    /** Crea el comando para una orden nueva, con identificadores y fecha generados. */
+    /** Crea el comando para una orden nueva, sin precio de referencia, con identificadores y fecha generados. */
     public static ComandoOrden nueva(String usuarioId, String simbolo, Lado lado,
                                      TipoOrden tipo, Long precioLimite, int cantidad) {
+        return nueva(usuarioId, simbolo, lado, tipo, precioLimite, null, cantidad);
+    }
+
+    /** Crea el comando para una orden nueva, con identificadores y fecha generados. */
+    public static ComandoOrden nueva(String usuarioId, String simbolo, Lado lado,
+                                     TipoOrden tipo, Long precioLimite, Long precioReferencia, int cantidad) {
         return new ComandoOrden(
                 UUID.randomUUID(),
                 AccionComando.NUEVA,
@@ -46,6 +57,7 @@ public record ComandoOrden(
                 lado,
                 tipo,
                 precioLimite,
+                precioReferencia,
                 cantidad,
                 Instant.now());
     }
@@ -56,10 +68,10 @@ public record ComandoOrden(
      * repetido, en vez de meter la orden dos veces en el libro.
      */
     public static ComandoOrden paraOrden(UUID ordenId, String usuarioId, String simbolo, Lado lado, TipoOrden tipo,
-                                         Long precioLimite, int cantidad) {
+                                         Long precioLimite, Long precioReferencia, int cantidad) {
         UUID comandoId = UUID.nameUUIDFromBytes((ordenId + "/NUEVA").getBytes(StandardCharsets.UTF_8));
         return new ComandoOrden(comandoId, AccionComando.NUEVA, ordenId, usuarioId, simbolo, lado, tipo, precioLimite,
-                cantidad, Instant.now());
+                precioReferencia, cantidad, Instant.now());
     }
 
     /**
@@ -68,9 +80,9 @@ public record ComandoOrden(
      * NUEVA. El comandoId sale del ordenId: si se publicara dos veces, el motor lo reconocería como repetido.
      */
     public static ComandoOrden cancelar(UUID ordenId, String usuarioId, String simbolo, Lado lado, TipoOrden tipo,
-                                        Long precioLimite, int cantidad) {
+                                        Long precioLimite, Long precioReferencia, int cantidad) {
         UUID comandoId = UUID.nameUUIDFromBytes((ordenId + "/CANCELAR").getBytes(StandardCharsets.UTF_8));
         return new ComandoOrden(comandoId, AccionComando.CANCELAR, ordenId, usuarioId, simbolo, lado, tipo,
-                precioLimite, cantidad, Instant.now());
+                precioLimite, precioReferencia, cantidad, Instant.now());
     }
 }

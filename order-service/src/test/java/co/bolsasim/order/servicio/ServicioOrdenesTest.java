@@ -104,6 +104,17 @@ class ServicioOrdenesTest {
     }
 
     @Test
+    void laOrdenGuardaLaMismaReferenciaConLaQueSeReservaYLaLlevaEnSuComandoNueva() {
+        Orden orden = servicio.crear(REGISTRADO.toString(), CLAVE, orden("ANDX", Lado.COMPRA, TipoOrden.MERCADO, null, 10)).orden();
+
+        // La referencia sale del instrumento, no de la solicitud del cliente (RF-26)
+        assertThat(orden.getPrecioReferencia()).isEqualTo(solicitudEnElOutbox().ultimoPrecio()).isEqualTo(5_000L);
+        ComandoOrden nueva = orden.comandoParaElMotor();
+        assertThat(nueva.precioReferencia()).isEqualTo(5_000L);
+        assertThat(nueva.precioLimite()).isNull();
+    }
+
+    @Test
     void unPrecioQueNoEsMultiploDelTickSeRechazaYNoGuardaNada() {
         assertThatThrownBy(() -> servicio.crear(REGISTRADO.toString(), CLAVE, orden("ANDX", Lado.COMPRA, TipoOrden.LIMITE, 5_005L, 100)))
                 .isInstanceOf(PrecioInvalidoException.class)
