@@ -294,7 +294,85 @@ form button[type='submit'] {
   color: var(--aviso);
 }
 
-/* Desde 360 px de ancho (RNF-41): en un celular el sector se esconde para que la tabla quepa */
+.navegacion {
+  display: flex;
+  gap: 4px 16px;
+}
+
+.navegacion a {
+  padding: 8px 0;
+  color: var(--texto-suave);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.navegacion a[aria-current='page'] {
+  color: var(--primario);
+  text-decoration: underline;
+  text-underline-offset: 6px;
+}
+
+.titulo-con-accion {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.titulo-con-accion h1 {
+  margin: 0;
+}
+
+.resumen {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin: 0 0 16px;
+}
+
+.resumen-dato {
+  padding: 12px;
+  background: var(--superficie);
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+}
+
+.resumen-dato dt {
+  color: var(--texto-suave);
+  font-size: 0.9rem;
+}
+
+.resumen-dato dd {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.resumen-dato.principal dd {
+  font-size: 1.5rem;
+}
+
+.tabla .detalle {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--texto-suave);
+}
+
+.tabla .ganancia,
+.tabla .ganancia .detalle {
+  color: var(--exito);
+}
+
+.tabla .perdida,
+.tabla .perdida .detalle {
+  color: var(--error);
+}
+
+/* Desde 360 px de ancho (RNF-41): en un celular se esconden las columnas .ocultable (el sector en Mercado, el precio
+ * actual en Portafolio) para que la tabla quepa */
 @media (max-width: 560px) {
   .ocultable {
     display: none;
@@ -319,5 +397,15 @@ form button[type='submit'] {
 
   .tarjeta {
     padding: 16px;
+  }
+
+  /* El resumen del portafolio en dos columnas: el valor total ocupa toda la fila */
+  .resumen {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .resumen-dato.principal {
+    grid-column: 1 / -1;
   }
 }

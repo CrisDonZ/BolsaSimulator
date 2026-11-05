@@ -44,7 +44,7 @@ Postman / curl ──▶ gateway                            (puerto 8082) ──
 | `eventos/` | Java puro, sin Spring: los eventos `ComandoOrden`, `SolicitudReserva`, `ReservaProcesada`, `UsuarioRegistrado`, `InstrumentoActualizado`, `EventoOrden` y `OperacionEjecutada`, los enums (como `EstadoOrden`) y los nombres de tópicos. Lo comparten todos los servicios. |
 | `order-service/` | API REST `POST /api/ordenes` y la consulta de tus órdenes (`GET /api/ordenes`, paginada por cursor, y `GET /api/ordenes/{id}`, HU-09). Rechaza con `422` un precio límite que no es múltiplo del tick o está a más de 10 % del último precio (RF-16). Guarda cada orden en la tabla ORDEN y su solicitud de reserva en OUTBOX en la misma transacción; un publicador la envía a `orders.requested` cada 100 ms, así nada se pierde si Kafka está caído (RNF-12). Cuando `reservations.events` trae la reserva aceptada, deja el comando de la orden en el outbox para `orders.commands`; si la trae rechazada, la orden queda `RECHAZADA` con el motivo (RF-18). Con el header `Idempotency-Key`, una orden enviada dos veces se crea una sola vez (HU-10). Vuelve a validar el JWT con la clave pública de auth-service y toma el usuario de la orden del token (`sub`), no del cuerpo. Escucha `users.registered` y `instruments.events` y guarda en su base una copia de los usuarios (tabla `usuario_registrado`) y de los instrumentos (tabla `instrumento`): acepta solo órdenes de usuarios registrados y de instrumentos activos. Escucha `orders.events` y actualiza cada orden; guarda cada ejecución en la tabla `ejecucion` y cada evento aplicado en `evento_procesado`, así un evento repetido no se aplica dos veces (RNF-09). Escucha `trades.executed` y guarda el último precio de cada instrumento, la referencia de la banda. |
 | `market-data-service/` | Por ahora, solo el catálogo de instrumentos (HU-22): `GET /api/instrumentos` para cualquier usuario con token, y crear, editar, suspender y reactivar solo para el rol `ADMIN`. Guarda la tabla INSTRUMENTO en PostgreSQL con Flyway, arranca con 10 instrumentos ficticios y publica cada cambio en `instruments.events`. Valida el JWT por su cuenta. El último precio y las velas llegarán en el sprint 4. |
-| `portfolio-service/` | La cuenta de cada usuario (HU-12): `GET /api/cuenta` (saldo disponible, reservado y total) y `GET /api/cuenta/movimientos` (filtrado por tipo y por fechas, paginado por cursor). Abre la cuenta con el saldo inicial al llegar `users.registered`, o la primera vez que el usuario la consulta si su evento no llegó. Escucha `instruments.events` y acredita las acciones emitidas de cada instrumento nuevo al creador de mercado, una sola vez por símbolo (RF-59). Escucha `orders.requested` y reserva el dinero de cada compra o las acciones de cada venta (RF-17): responde en `reservations.events`, con su propio outbox. Escucha `orders.events` y liquida cada operación con doble partida: el comprador paga con su reserva y recibe las acciones, el vendedor las entrega y cobra, y lo que sobra se libera (RF-30, RF-31, RNF-08). Guarda las tablas CUENTA, MOVIMIENTO, RESERVA, POSICION, EMISION y OUTBOX en PostgreSQL con Flyway; ningún saldo ni posición puede quedar negativo (CHECK en la base, RNF-07). Valida el JWT por su cuenta. La consulta del portafolio llega con HU-11. |
+| `portfolio-service/` | La cuenta de cada usuario (HU-12): `GET /api/cuenta` (saldo disponible, reservado y total) y `GET /api/cuenta/movimientos` (filtrado por tipo y por fechas, paginado por cursor). Abre la cuenta con el saldo inicial al llegar `users.registered`, o la primera vez que el usuario la consulta si su evento no llegó. Escucha `instruments.events` y acredita las acciones emitidas de cada instrumento nuevo al creador de mercado, una sola vez por símbolo (RF-59). Escucha `orders.requested` y reserva el dinero de cada compra o las acciones de cada venta (RF-17): responde en `reservations.events`, con su propio outbox. Escucha `orders.events` y liquida cada operación con doble partida: el comprador paga con su reserva y recibe las acciones, el vendedor las entrega y cobra, y lo que sobra se libera (RF-30, RF-31, RNF-08). Escucha `trades.executed` y guarda el último precio de cada símbolo, y con él responde `GET /api/portafolio` (HU-11): cada posición con su valor actual y su ganancia o pérdida, y el valor total. Guarda las tablas CUENTA, MOVIMIENTO, RESERVA, POSICION, EMISION, ULTIMO_PRECIO y OUTBOX en PostgreSQL con Flyway; ningún saldo ni posición puede quedar negativo (CHECK en la base, RNF-07). Valida el JWT por su cuenta. |
 | `matching-engine/` | El libro de órdenes (`libro/`, Java puro con pruebas JUnit) y su consumidor de Kafka. Por cada comando publica `EventoOrden` en `orders.events` y `OperacionEjecutada` en `trades.executed`, dentro de una transacción de Kafka junto con el offset del comando (RNF-10). Reconoce un comando repetido y reenvía lo mismo sin tocar el libro (RNF-09). Ejecuta una orden a mercado solo dentro de ±10 % del precio de referencia que trae su comando y cancela el resto (RF-26). |
 | `auth-service/` | API REST `POST /api/usuarios` (registro, HU-01) y `GET /api/usuarios/{id}`. Guarda la tabla USUARIO en PostgreSQL con Flyway; contraseñas con BCrypt. Publica `UsuarioRegistrado` en `users.registered`. Sesión (HU-02): `POST /api/auth/login`, `/refresh` y `/logout`, con JWT firmados con RS256 y la clave pública en `/.well-known/jwks.json`. Vuelve a validar el JWT en las rutas protegidas: cada usuario solo consulta su propio perfil y solo cierra sus propias sesiones. Al arrancar crea el primer `ADMIN` con las variables `BOLSASIM_ADMIN_CORREO` y `BOLSASIM_ADMIN_CONTRASENA`, y el bot creador de mercado (rol `BOT`) con `BOLSASIM_CREADOR_MERCADO_CORREO` y `BOLSASIM_CREADOR_MERCADO_CONTRASENA`. |
 | `gateway/` | Spring Cloud Gateway (WebFlux) en el puerto 8080: enruta a auth-service, order-service, market-data-service y portfolio-service y exige un JWT válido, verificado con la clave pública de auth-service, salvo para registrarse, iniciar sesión, renovar el token y leer la clave. Reenvía el token original sin cambiarlo. |
@@ -175,6 +175,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/auth/logout -Heade
 | `GET /api/ordenes?estado=…&tamano=…&despues=…` | Sí | `200` con `ordenes` (de la más reciente a la más vieja) y `siguiente`. Ver *Tus órdenes* abajo. |
 | `GET /api/cuenta` | Sí | `200` con tu saldo disponible, reservado y total, y el saldo inicial. Si tu cuenta todavía no existía, esta consulta la abre. Un `ADMIN` recibe `404`: no tiene cuenta de inversión. Ver *Tu cuenta* abajo. |
 | `GET /api/cuenta/movimientos?tipo=…&desde=…&hasta=…&tamano=…&despues=…` | Sí | `200` con `movimientos` (del más reciente al más viejo) y `siguiente`. |
+| `GET /api/portafolio` | Sí | `200` con tu saldo, cada acción que tienes con su valor actual y su ganancia o pérdida, y el valor total. Un `ADMIN` recibe `404`. Ver *Tu portafolio* abajo. |
 | Todas las rutas que piden token | Sí | Sin token, con el token vencido, con la firma alterada o de otro emisor: `401` del gateway, y la petición no llega al servicio. Cada servicio vuelve a validar el token: llamándolos directo (8081 a 8084) también responden `401`. |
 
 El token de acceso lleva solo el id del usuario (`sub`) y su `rol`: nada de correo ni nombre, porque cualquiera que lo tenga puede leerlo. En la base solo se guarda el hash del token de refresco. El gateway no mira el `rol`: cada servicio decide qué puede hacer cada rol.
@@ -300,6 +301,30 @@ Invoke-RestMethod -Uri http://localhost:8080/api/cuenta -Headers $auth
 - **Nadie ve la cuenta de otro:** las rutas no llevan id; la cuenta siempre es la del token.
 - **Ningún saldo queda negativo:** además de las reglas del servicio, la base lo rechaza con un CHECK (RNF-07).
 
+## Tu portafolio
+
+Tus acciones valoradas al último precio, y todo lo que tienes (HU-11, RF-32, RF-33):
+
+```powershell
+$p = Invoke-RestMethod -Uri http://localhost:8080/api/portafolio -Headers $auth
+$p | Select-Object saldoTotal, valorAcciones, valorTotal
+$p.posiciones | Format-Table simbolo, cantidad, precioPromedio, precioActual, valorActual, ganancia, gananciaPorcentaje
+```
+
+| Campo | Qué es |
+| --- | --- |
+| `cantidad` | Todas tus acciones de ese símbolo, también las que están reservadas en una venta abierta (`cantidadReservada`): siguen siendo tuyas |
+| `precioPromedio` | Lo que pagaste en promedio por acción, con 4 decimales: comprar 100 a 5.000 y luego 100 a 6.000 da 5.500. Vender no lo cambia |
+| `precioActual` | El de la última operación del símbolo o, si todavía no tiene ninguna, su precio inicial |
+| `costo` y `valorActual` | cantidad × precio promedio y cantidad × precio actual, en COP redondeados al peso |
+| `ganancia` y `gananciaPorcentaje` | valor actual − costo, y su porcentaje sobre el costo con 2 decimales; negativos si pierdes |
+| `valorAcciones` y `valorTotal` | Lo que valen todas tus acciones, y eso más tu `saldoTotal` (disponible + reservado) |
+
+- **El último precio es una copia local.** portfolio-service escucha `trades.executed` y guarda el precio de cada operación en ULTIMO_PRECIO, igual que order-service guarda su precio de referencia. Una operación más vieja que la copia no la reemplaza, y la misma dos veces deja lo mismo. Así la consulta no depende de que otro servicio esté arriba.
+- **Los valores son los del momento de la consulta.** La actualización en vivo sin recargar (RF-33) llega con el WebSocket; mientras tanto, la pantalla Portafolio tiene un botón *Actualizar*.
+- **Solo aparecen las acciones que todavía tienes:** una posición que vendiste completa no sale. Sin acciones, `valorTotal` es tu saldo total.
+- **Nadie ve el portafolio de otro:** como en la cuenta, la ruta no lleva id.
+
 ## Tus órdenes
 
 Cada orden queda guardada con su estado, y se actualiza sola cuando portfolio-service responde su reserva (`reservations.events`) y cuando el motor publica lo que pasó con ella (`orders.events`):
@@ -399,10 +424,12 @@ npm run dev     # http://localhost:5173
 
 Abre `http://localhost:5173`, crea tu cuenta y entra a **Mercado**: ahí están los instrumentos con su precio y su estado, y un buscador por símbolo o nombre ("and" encuentra ANDX). Por ahora el precio es el inicial; el último precio, la variación del día y la actualización en vivo llegan con el resto de HU-14.
 
+En **Portafolio** (el enlace del encabezado) ves tu valor total, tu saldo y cada acción con su precio promedio, su valor actual y su ganancia o pérdida, con signo y en verde o rojo. En un celular se esconde el precio actual para que la tabla quepa en 360 px (RNF-41). Los valores son los del momento en que abriste la pantalla; *Actualizar* los vuelve a consultar.
+
 | Comando | Qué hace |
 | --- | --- |
 | `npm run dev` | Servidor de desarrollo en el puerto 5173, con recarga en caliente |
-| `npm test` | Pruebas con Vitest y Testing Library (29), sin backend: `fetch` es simulado |
+| `npm test` | Pruebas con Vitest y Testing Library (34), sin backend: `fetch` es simulado |
 | `npm run lint` / `npm run typecheck` | ESLint y TypeScript en modo estricto, sin advertencias |
 | `npm run build` | La app lista para producción en `frontend/dist/`, con su Content-Security-Policy |
 | `npm run preview` | Sirve `dist/` en el puerto 4173 con los headers de seguridad, para probar el build |
@@ -416,6 +443,7 @@ Abre `http://localhost:5173`, crea tu cuenta y entra a **Mercado**: ahí están 
 | `src/api/` | El único lugar que llama a `fetch` (`cliente.ts`), los tipos de la API escritos igual que los DTO del backend (`tipos.ts`) y dónde viven los tokens (`almacenTokens.ts`) |
 | `src/sesion/` | La sesión (`SesionProvider`), las rutas protegidas e Ingresar y Registrarme |
 | `src/mercado/` | La pantalla Mercado, que se carga aparte (`React.lazy`) para no pesar en el login |
+| `src/portafolio/` | La pantalla Portafolio, que también se carga aparte |
 | `src/comun/` | La plantilla con el encabezado y el aviso legal, los campos de formulario y el formato de pesos |
 
 **Sesión (HU-02).**
@@ -521,7 +549,7 @@ GitHub Actions (`.github/workflows/build.yml`) corre las pruebas y esta prueba d
 - **Instantáneas del libro (RNF-13):** los libros viven en memoria y se pierden al reiniciar el motor. Publicarlos en `orderbook.snapshots` (compactado) y reconstruirlos al arrancar desde la última instantánea y los comandos posteriores.
 - **Órdenes que vencen al cierre (RF-21):** las órdenes límite deben cancelarse solas al cerrar el mercado; llega con la apertura y el cierre (HU-23), y puede usar el mismo comando `CANCELAR`.
 - **Orden del outbox de portfolio-service:** order-service ya ordena su outbox por una secuencia; el de portfolio-service todavía ordena por `(creado_en, id)`.
-- **Ver mi portafolio (HU-11, RF-32):** la tabla POSICION ya se mantiene con cada compra, venta y emisión; falta el endpoint con el valor actual y la ganancia o pérdida.
+- **Portafolio en vivo (RF-33, HU-11):** `GET /api/portafolio` y la pantalla Portafolio ya muestran el valor actual y la ganancia o pérdida, pero solo se actualizan al consultar. Falta empujar el valor nuevo por WebSocket cada vez que cambia el último precio de una acción que el usuario tiene.
 - **Bots de mercado (HU-24):** el creador de mercado ya existe y tiene las acciones emitidas; falta bot-service, que pone sus órdenes de compra y venta según una estrategia.
 - **Autocruce (RF-27):** hoy una orden puede cruzarse con otra del mismo usuario; el motor debe cancelar la entrante.
 - **Outbox en auth-service y market-data-service:** order-service y portfolio-service ya lo usan. En auth-service, si Kafka está caído justo después de registrar a alguien, el evento se pierde (el del creador de mercado no, porque se vuelve a publicar en cada arranque). Con los instrumentos el daño es menor, porque market-data-service vuelve a publicar todo el catálogo cada vez que arranca.

@@ -1,12 +1,13 @@
 package co.bolsasim.portfolio.posicion;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 /**
- * Tabla POSICION: las acciones de cada cuenta, con JDBC. La consulta del portafolio llega con HU-11.
+ * Tabla POSICION: las acciones de cada cuenta, con JDBC.
  *
  * <p>Como en CUENTA, cada cambio es un solo UPDATE que suma o resta sobre el valor de la base, con su condición en
  * el mismo WHERE. La reserva de una venta (partición por usuario) y la liquidación (partición por símbolo) pueden
@@ -92,6 +93,25 @@ public class RepositorioPosiciones {
                 .param("simbolo", simbolo)
                 .param("cantidad", cantidad)
                 .update() == 1;
+    }
+
+    /**
+     * Las posiciones de la cuenta que todavía tienen acciones, por símbolo, con el precio para valorarlas: el de la
+     * última operación o, si el símbolo todavía no tiene operaciones, su precio inicial. Una posición sin ninguno de
+     * los dos (no debería pasar: toda acción sale de una emisión) se valora a su costo promedio, sin ganar ni perder.
+     */
+    public List<PosicionConPrecio> deLaCuenta(UUID cuentaId) {
+        return jdbc.sql("""
+                        SELECT p.simbolo, p.cantidad, p.cantidad_reservada, p.costo_promedio,
+                               COALESCE(u.precio, e.precio_inicial, ROUND(p.costo_promedio)) AS precio_actual
+                        FROM posicion p
+                        LEFT JOIN ultimo_precio u ON u.simbolo = p.simbolo
+                        LEFT JOIN emision e ON e.simbolo = p.simbolo
+                        WHERE p.cuenta_id = :cuenta AND p.cantidad > 0
+                        ORDER BY p.simbolo""")
+                .param("cuenta", cuentaId)
+                .query(PosicionConPrecio.class)
+                .list();
     }
 
     public Optional<Posicion> buscar(UUID cuentaId, String simbolo) {

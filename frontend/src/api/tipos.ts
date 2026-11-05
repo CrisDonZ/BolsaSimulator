@@ -61,3 +61,26 @@ export interface ProblemDetails {
   detail?: string;
   status?: number;
 }
+
+/** portfolio-service: PortafolioResponse.PosicionResponse. Montos en COP enteros; precioPromedio, con hasta 4 decimales. */
+export interface Posicion {
+  simbolo: string;
+  cantidad: number;
+  cantidadReservada: number;
+  precioPromedio: number;
+  precioActual: number;
+  costo: number;
+  valorActual: number;
+  ganancia: number;
+  gananciaPorcentaje: number;
+}
+
+/** portfolio-service: PortafolioResponse. valorTotal es saldoTotal + valorAcciones. */
+export interface Portafolio {
+  saldoDisponible: number;
+  saldoReservado: number;
+  saldoTotal: number;
+  valorAcciones: number;
+  valorTotal: number;
+  posiciones: Posicion[];
+}

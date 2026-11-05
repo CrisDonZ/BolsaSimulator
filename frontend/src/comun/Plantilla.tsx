@@ -1,4 +1,4 @@
-import { Link, Outlet, useNavigate } from 'react-router';
+import { Link, NavLink, Outlet, useNavigate } from 'react-router';
 import { useState } from 'react';
 import type { Rol } from '../api/tipos';
 import { useSesion } from '../sesion/contexto';
@@ -37,6 +37,12 @@ export function Plantilla() {
         <Link to="/mercado" className="marca">
           BolsaSim
         </Link>
+        {sesion.estado === 'activa' && (
+          <nav className="navegacion" aria-label="Principal">
+            <NavLink to="/mercado">Mercado</NavLink>
+            <NavLink to="/portafolio">Portafolio</NavLink>
+          </nav>
+        )}
         {sesion.estado === 'activa' && (
           <div className="encabezado-usuario">
             <span>

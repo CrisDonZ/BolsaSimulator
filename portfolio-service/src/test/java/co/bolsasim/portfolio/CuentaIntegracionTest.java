@@ -13,6 +13,7 @@ import co.bolsasim.eventos.EstadoOrden;
 import co.bolsasim.eventos.EventoOrden;
 import co.bolsasim.eventos.InstrumentoActualizado;
 import co.bolsasim.eventos.Lado;
+import co.bolsasim.eventos.OperacionEjecutada;
 import co.bolsasim.eventos.SolicitudReserva;
 import co.bolsasim.eventos.TipoOrden;
 import co.bolsasim.eventos.Topicos;
@@ -183,6 +184,33 @@ class CuentaIntegracionTest {
                 .andExpect(jsonPath("$.movimientos.length()").value(1))
                 .andExpect(jsonPath("$.movimientos[0].monto").value(0))
                 .andExpect(jsonPath("$.movimientos[0].cantidad").value(2_000));
+    }
+
+    @Test
+    void unaOperacionDeTradesExecutedCambiaElValorDelPortafolio() throws Exception {
+        UUID dueno = UUID.randomUUID();
+        servicio.abrir(dueno);
+        // 10 acciones de PREC compradas a 5.000, como si ya se hubieran liquidado
+        jdbc.sql("""
+                        INSERT INTO posicion (id, cuenta_id, simbolo, cantidad, cantidad_reservada, costo_promedio, version)
+                        SELECT :id, c.id, 'PREC', 10, 0, 5000, 0 FROM cuenta c WHERE c.usuario_id = :usuario""")
+                .param("id", UUID.randomUUID()).param("usuario", dueno).update();
+
+        // El motor publica una operación de PREC a 5.300 (llega repetida)
+        OperacionEjecutada operacion = new OperacionEjecutada(UUID.randomUUID(), "PREC", 5_300, 5, UUID.randomUUID(),
+                UUID.randomUUID().toString(), UUID.randomUUID(), UUID.randomUUID().toString(), Instant.now());
+        kafkaTemplate.send(Topicos.TRADES_EXECUTED, "PREC", operacion);
+        kafkaTemplate.send(Topicos.TRADES_EXECUTED, "PREC", operacion);
+        await().atMost(Duration.ofSeconds(30)).until(() -> jdbc.sql(
+                "SELECT count(*) FROM ultimo_precio WHERE simbolo = 'PREC' AND precio = 5300").query(Integer.class)
+                .single() == 1);
+
+        mvc.perform(get("/api/portafolio").header(HttpHeaders.AUTHORIZATION, "Bearer " + TokensDePrueba.de(dueno, "INVERSIONISTA")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.posiciones[0].precioActual").value(5_300))
+                .andExpect(jsonPath("$.posiciones[0].valorActual").value(53_000))
+                .andExpect(jsonPath("$.posiciones[0].ganancia").value(3_000))
+                .andExpect(jsonPath("$.valorTotal").value(10_053_000));
     }
 
     @Test

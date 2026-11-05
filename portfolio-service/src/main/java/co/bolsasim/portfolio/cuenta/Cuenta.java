@@ -18,7 +18,7 @@ public record Cuenta(
         long saldoReservado,
         Instant actualizadoEn) {
 
-    /** Disponible + reservado: todo el dinero de la cuenta. El valor de las acciones se suma con HU-11. */
+    /** Disponible + reservado: todo el dinero de la cuenta. El valor de las acciones se suma en el portafolio. */
     public long saldoTotal() {
         return saldoDisponible + saldoReservado;
     }
