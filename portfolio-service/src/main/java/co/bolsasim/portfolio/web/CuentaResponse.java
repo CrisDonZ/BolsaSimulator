@@ -5,7 +5,7 @@ import java.time.Instant;
 
 /**
  * El saldo de la cuenta (RF-08), en COP enteros. saldoTotal es disponible + reservado: todo el dinero. El valor
- * de las acciones se suma al portafolio con HU-11.
+ * de las acciones se suma en GET /api/portafolio.
  */
 public record CuentaResponse(
         long saldoDisponible,

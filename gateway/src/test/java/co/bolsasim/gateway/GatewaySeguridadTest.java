@@ -179,7 +179,8 @@ class GatewaySeguridadTest {
             "GET,  /api/instrumentos",
             "POST, /api/instrumentos/ANDX/suspender",
             "GET,  /api/cuenta",
-            "GET,  /api/cuenta/movimientos"})
+            "GET,  /api/cuenta/movimientos",
+            "GET,  /api/portafolio"})
     void lasDemasRutasDeLosServiciosExigenToken(String metodo, String ruta) {
         cliente.method(HttpMethod.valueOf(metodo)).uri(ruta)
                 .exchange()

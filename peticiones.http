@@ -466,3 +466,9 @@ Content-Type: application/json
   "precioReferencia": 1,
   "cantidad": 10
 }
+
+### 45. Tu portafolio (HU-11): cada acción con cantidad, precio promedio, precio actual (el de la última operación o,
+###     sin operaciones, el inicial), valor actual y ganancia o pérdida en COP y en %; y el valor total = saldo total
+###     + valor de las acciones. Después de la 43 verás ANDX. Un ADMIN recibe 404.
+GET {{gateway}}/api/portafolio
+Authorization: Bearer {{token}}

@@ -8,6 +8,7 @@ import { RutaProtegida } from './sesion/RutaProtegida';
 
 // Carga diferida: Mercado y lo que venga después (la ficha con el gráfico, el portafolio) no pesan en el login
 const PaginaMercado = lazy(() => import('./mercado/PaginaMercado'));
+const PaginaPortafolio = lazy(() => import('./portafolio/PaginaPortafolio'));
 
 /**
  * | Ruta        | Pantalla                  | Sesión                                     |
@@ -15,6 +16,7 @@ const PaginaMercado = lazy(() => import('./mercado/PaginaMercado'));
  * | /ingresar   | Iniciar sesión (HU-02)    | con sesión, lleva a /mercado               |
  * | /registro   | Crear tu cuenta (HU-01)   | con sesión, lleva a /mercado               |
  * | /mercado    | Mercado (HU-14)           | protegida: sin sesión, lleva a /ingresar   |
+ * | /portafolio | Portafolio (HU-11)        | protegida                                  |
  */
 export function App() {
   return (
@@ -29,6 +31,16 @@ export function App() {
             <RutaProtegida>
               <Suspense fallback={<Cargando />}>
                 <PaginaMercado />
+              </Suspense>
+            </RutaProtegida>
+          }
+        />
+        <Route
+          path="portafolio"
+          element={
+            <RutaProtegida>
+              <Suspense fallback={<Cargando />}>
+                <PaginaPortafolio />
               </Suspense>
             </RutaProtegida>
           }

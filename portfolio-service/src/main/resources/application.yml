@@ -42,7 +42,8 @@ spring:
         "[enable.idempotence]": true
     consumer:
       # Lee users.registered para abrir la cuenta de cada usuario, orders.requested para reservar el saldo de cada
-      # orden y orders.events para liquidar lo que ejecuta el motor
+      # orden, orders.events para liquidar lo que ejecuta el motor y trades.executed para el último precio con el que
+      # se valora el portafolio
       group-id: portfolio-service
       # Si el grupo es nuevo, lee el tópico desde el principio: así abre las cuentas de los usuarios que ya
       # estaban registrados

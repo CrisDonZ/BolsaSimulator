@@ -39,7 +39,7 @@ spring:
             - id: portfolio-service
               uri: ${bolsasim.servicios.cuenta}
               predicates:
-                - Path=/api/cuenta/**
+                - Path=/api/cuenta/**,/api/portafolio/**
 
 logging:
   level:
