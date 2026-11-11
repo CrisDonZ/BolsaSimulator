@@ -11,7 +11,7 @@ describe('Mercado (HU-14)', () => {
     almacenTokens.guardar(tokenDePrueba(USUARIO_ID), 'refresco');
   });
 
-  it('muestra los instrumentos con su precio con punto de miles y su estado en texto', async () => {
+  it('muestra los instrumentos con su último precio con punto de miles y su estado en texto', async () => {
     simularApi({
       [`GET /api/usuarios/${USUARIO_ID}`]: () => json(perfil()),
       'GET /api/instrumentos': () => json(INSTRUMENTOS),
@@ -28,6 +28,32 @@ describe('Mercado (HU-14)', () => {
     // RNF-42: el suspendido se lee, no solo se ve en otro color
     expect(within(tabla).getByRole('rowheader', { name: 'TAYR' }).closest('tr')).toHaveTextContent('Suspendido');
     expect(within(tabla).getByText('12.500')).toBeInTheDocument();
+    // El precio es el último, no el inicial (4.000)
+    expect(tabla).not.toHaveTextContent('4.000');
+  });
+
+  it('muestra la variación del día con su signo: sube, baja o queda igual', async () => {
+    simularApi({
+      [`GET /api/usuarios/${USUARIO_ID}`]: () => json(perfil()),
+      'GET /api/instrumentos': () => json(INSTRUMENTOS),
+    });
+    renderizarApp('/mercado');
+    const tabla = await screen.findByRole('table');
+    const fila = (simbolo: string) => within(tabla).getByRole('rowheader', { name: simbolo }).closest('tr');
+
+    // RNF-42: el signo va en el texto; el color solo lo acompaña
+    expect(fila('ANDX')).toHaveTextContent('+200');
+    expect(fila('ANDX')).toHaveTextContent('+4,17 %');
+    expect(within(tabla).getByText('+4,17 %', { exact: false })).toHaveClass('ganancia');
+    expect(fila('CAFE')).toHaveTextContent('-500');
+    expect(fila('CAFE')).toHaveTextContent('-3,85 %');
+    expect(within(tabla).getByText('-3,85 %', { exact: false })).toHaveClass('perdida');
+    // Sin operaciones hoy: 0,00 %, sin signo ni color
+    expect(fila('TAYR')).toHaveTextContent('0,00 %');
+    expect(fila('TAYR')).not.toHaveTextContent(/[+-]0/);
+    const sinCambio = within(tabla).getByText('0,00 %', { exact: false });
+    expect(sinCambio).not.toHaveClass('ganancia');
+    expect(sinCambio).not.toHaveClass('perdida');
   });
 
   it('el buscador filtra por símbolo o nombre sin importar mayúsculas', async () => {

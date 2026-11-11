@@ -178,9 +178,9 @@ Tipos de PostgreSQL. Los montos en COP usan BIGINT porque no tienen decimales; l
 
 | Campo | Tipo | Restricción | Descripción |
 | --- | --- | --- | --- |
-| id | UUID | PK | Identificador |
+| id | UUID | PK | El id de la operación en `trades.executed`: si el evento llega dos veces, se guarda una sola |
 | simbolo | VARCHAR(10) | FK → INSTRUMENTO; UNIQUE con secuencia | Acción negociada |
-| secuencia | BIGINT | NOT NULL | Orden de ejecución dentro del instrumento |
+| secuencia | BIGINT | NOT NULL | Orden de ejecución dentro del instrumento; la asigna market-data-service al guardar |
 | precio | BIGINT | CHECK > 0 | Precio pactado |
 | cantidad | INTEGER | CHECK > 0 | Acciones negociadas |
 | orden\_compra\_id · orden\_venta\_id | UUID | Referencia lógica a ORDEN | Las dos órdenes que se cruzaron |
@@ -266,7 +266,7 @@ Las listas que un usuario recorre (órdenes y movimientos) se paginan por cursor
 | ORDEN | (usuario\_id, creada\_en DESC, id DESC) parcial donde estado IN (ABIERTA, PARCIAL) | Órdenes abiertas del usuario |
 | ORDEN | UNIQUE (usuario\_id, clave\_idempotencia) | Reconocer la orden repetida, también si dos solicitudes llegan a la vez |
 | EJECUCION | UNIQUE (orden\_id, operacion\_id) | Una operación se registra una sola vez por orden |
-| OPERACION | (simbolo, ejecutada\_en DESC) | Últimas 20 operaciones |
+| OPERACION | (simbolo, ejecutada\_en DESC) | Últimas 20 operaciones; último precio y precio de apertura del día |
 | MOVIMIENTO | (cuenta\_id, creado\_en DESC, id DESC) | Historial de la cuenta, paginado por cursor y filtrado por fechas |
 | MOVIMIENTO | (cuenta\_id, tipo, creado\_en DESC, id DESC) | Historial filtrado por tipo |
 | NOTIFICACION | (usuario\_id, leida) | Notificaciones sin leer |

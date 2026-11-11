@@ -38,3 +38,17 @@ spring:
       value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
       # Kafka confirma el mensaje solo cuando quedó guardado de forma segura
       acks: all
+    consumer:
+      # Lee trades.executed para guardar cada operación: de ahí salen el último precio y la variación del día
+      group-id: market-data-service
+      # Si el grupo es nuevo, lee el tópico desde el principio: así guarda las operaciones que ya había
+      auto-offset-reset: earliest
+      # Solo lee mensajes de transacciones confirmadas: si el motor aborta una (RNF-10), sus eventos no llegan
+      isolation-level: read-committed
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # ErrorHandlingDeserializer evita que un mensaje mal formado bloquee al consumidor
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        "[spring.deserializer.value.delegate.class]": org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+        # Solo se aceptan clases de este paquete al convertir el JSON (seguridad)
+        "[spring.json.trusted.packages]": co.bolsasim.eventos

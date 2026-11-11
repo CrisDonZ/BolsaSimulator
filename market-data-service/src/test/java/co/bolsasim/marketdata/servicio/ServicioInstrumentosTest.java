@@ -3,6 +3,7 @@ package co.bolsasim.marketdata.servicio;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -13,6 +14,8 @@ import co.bolsasim.eventos.EstadoInstrumento;
 import co.bolsasim.eventos.InstrumentoActualizado;
 import co.bolsasim.marketdata.instrumento.Instrumento;
 import co.bolsasim.marketdata.instrumento.RepositorioInstrumentos;
+import co.bolsasim.marketdata.operacion.Cotizacion;
+import co.bolsasim.marketdata.operacion.RepositorioOperaciones;
 import co.bolsasim.marketdata.web.CrearInstrumentoRequest;
 import co.bolsasim.marketdata.web.EditarInstrumentoRequest;
 import java.time.Instant;
@@ -30,7 +33,38 @@ class ServicioInstrumentosTest {
 
     private final RepositorioInstrumentos repositorio = mock(RepositorioInstrumentos.class);
     private final PublicadorInstrumentos publicador = mock(PublicadorInstrumentos.class);
-    private final ServicioInstrumentos servicio = new ServicioInstrumentos(repositorio, publicador);
+    private final RepositorioOperaciones operaciones = mock(RepositorioOperaciones.class);
+    private final ServicioInstrumentos servicio = new ServicioInstrumentos(repositorio, publicador, operaciones);
+
+    @Test
+    void elDiaEmpiezaALasCeroHorasDeColombia() {
+        // Las 03:00 UTC del 10 son las 22:00 del 9 en Colombia (UTC-5): el día empezó el 9 a las 00:00 de allá
+        assertThat(ServicioInstrumentos.inicioDelDia(Instant.parse("2026-11-10T03:00:00Z")))
+                .isEqualTo(Instant.parse("2026-11-09T05:00:00Z"));
+        assertThat(ServicioInstrumentos.inicioDelDia(Instant.parse("2026-11-10T05:00:00Z")))
+                .isEqualTo(Instant.parse("2026-11-10T05:00:00Z"));
+        assertThat(ServicioInstrumentos.inicioDelDia(Instant.parse("2026-11-10T20:30:00Z")))
+                .isEqualTo(Instant.parse("2026-11-10T05:00:00Z"));
+    }
+
+    @Test
+    void buscarNormalizaElSimboloYPideLosPreciosDesdeElComienzoDelDia() {
+        Cotizacion andx = new Cotizacion("ANDX", "Andex Energía", "Energía", 5_000, 10, 1_000_000,
+                EstadoInstrumento.ACTIVO, AYER, 5_250, 5_000);
+        when(operaciones.cotizacion(eq("ANDX"), any())).thenReturn(Optional.of(andx));
+
+        assertThat(servicio.buscar(" andx ")).isEqualTo(andx);
+        ArgumentCaptor<Instant> inicio = ArgumentCaptor.forClass(Instant.class);
+        verify(operaciones).cotizacion(eq("ANDX"), inicio.capture());
+        assertThat(inicio.getValue()).isEqualTo(ServicioInstrumentos.inicioDelDia(Instant.now()));
+    }
+
+    @Test
+    void buscarUnSimboloQueNoExisteFalla() {
+        when(operaciones.cotizacion(any(), any())).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> servicio.buscar("nada")).isInstanceOf(InstrumentoNoEncontradoException.class);
+    }
 
     @Test
     void crearGuardaElInstrumentoActivoYPublicaSuEstadoCompleto() {
