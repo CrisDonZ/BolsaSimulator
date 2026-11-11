@@ -17,7 +17,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import co.bolsasim.marketdata.TokensDePrueba;
+import co.bolsasim.eventos.EstadoInstrumento;
 import co.bolsasim.marketdata.instrumento.Instrumento;
+import co.bolsasim.marketdata.operacion.Cotizacion;
 import co.bolsasim.marketdata.seguridad.ConfiguracionSeguridad;
 import co.bolsasim.marketdata.seguridad.RespuestaNoAutorizado;
 import co.bolsasim.marketdata.seguridad.RespuestaProhibido;
@@ -74,9 +76,17 @@ class InstrumentoControllerTest {
     private final Instrumento nuevo = new Instrumento("NUEVO", "Nueva Empresa", "Energía", 5_000, 10, 1_000_000,
             Instant.now());
 
+    /** Lo que responde el servicio al consultar ese instrumento: aquí, sin operaciones todavía. */
+    private static Cotizacion cotizacion(Instrumento instrumento, long ultimoPrecio, long precioApertura) {
+        return new Cotizacion(instrumento.getSimbolo(), instrumento.getNombre(), instrumento.getSector(),
+                instrumento.getPrecioInicial(), instrumento.getTick(), instrumento.getAccionesEmitidas(),
+                instrumento.getEstado(), instrumento.getCreadoEn(), ultimoPrecio, precioApertura);
+    }
+
     @Test
     void unAdminCreaUnInstrumentoYRecibe201ConLaUbicacion() throws Exception {
         when(servicio.crear(any())).thenReturn(nuevo);
+        when(servicio.buscar("NUEVO")).thenReturn(cotizacion(nuevo, 5_000, 5_000));
 
         pedir(post("/api/instrumentos").contentType(MediaType.APPLICATION_JSON).content(NUEVO), "ADMIN")
                 .andExpect(status().isCreated())
@@ -84,7 +94,10 @@ class InstrumentoControllerTest {
                 .andExpect(jsonPath("$.simbolo").value("NUEVO"))
                 .andExpect(jsonPath("$.tick").value(10))
                 .andExpect(jsonPath("$.accionesEmitidas").value(1_000_000))
-                .andExpect(jsonPath("$.estado").value("ACTIVO"));
+                .andExpect(jsonPath("$.estado").value("ACTIVO"))
+                // Recién creado no tiene operaciones: su precio es el inicial
+                .andExpect(jsonPath("$.ultimoPrecio").value(5_000))
+                .andExpect(jsonPath("$.variacion").value(0));
     }
 
     @Test
@@ -135,6 +148,7 @@ class InstrumentoControllerTest {
         Instrumento andx = new Instrumento("ANDX", "Andex Energía S.A.", "Energía renovable", 5_000, 10, 1_000_000,
                 Instant.now());
         when(servicio.editar(eq("ANDX"), any())).thenReturn(andx);
+        when(servicio.buscar("ANDX")).thenReturn(cotizacion(andx, 5_000, 5_000));
 
         pedir(put("/api/instrumentos/ANDX").contentType(MediaType.APPLICATION_JSON).content(EDICION), "ADMIN")
                 .andExpect(status().isOk())
@@ -168,6 +182,7 @@ class InstrumentoControllerTest {
         Instrumento andx = new Instrumento("ANDX", "Andex Energía", "Energía", 5_000, 10, 1_000_000, Instant.now());
         andx.suspender(Instant.now());
         when(servicio.suspender("ANDX")).thenReturn(andx);
+        when(servicio.buscar("ANDX")).thenReturn(cotizacion(andx, 5_000, 5_000));
 
         pedir(post("/api/instrumentos/ANDX/suspender"), "ADMIN")
                 .andExpect(status().isOk())
@@ -175,6 +190,7 @@ class InstrumentoControllerTest {
 
         Instrumento reactivado = new Instrumento("ANDX", "Andex Energía", "Energía", 5_000, 10, 1_000_000, Instant.now());
         when(servicio.reactivar("ANDX")).thenReturn(reactivado);
+        when(servicio.buscar("ANDX")).thenReturn(cotizacion(reactivado, 5_000, 5_000));
 
         pedir(post("/api/instrumentos/ANDX/reactivar"), "ADMIN")
                 .andExpect(status().isOk())
@@ -243,15 +259,23 @@ class InstrumentoControllerTest {
 
     @Test
     void cualquierUsuarioConTokenConsultaElCatalogo() throws Exception {
-        when(servicio.listar()).thenReturn(List.of(nuevo));
-        when(servicio.buscar("NUEVO")).thenReturn(nuevo);
+        when(servicio.listar()).thenReturn(List.of(cotizacion(nuevo, 5_250, 5_000)));
+        when(servicio.buscar("NUEVO")).thenReturn(cotizacion(nuevo, 4_500, 5_000));
 
+        // HU-14: cada instrumento trae su último precio y su variación del día, en COP y en %
         pedir(get("/api/instrumentos"), "INVERSIONISTA")
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[0].simbolo").value("NUEVO"));
+                .andExpect(jsonPath("$[0].simbolo").value("NUEVO"))
+                .andExpect(jsonPath("$[0].precioInicial").value(5_000))
+                .andExpect(jsonPath("$[0].ultimoPrecio").value(5_250))
+                .andExpect(jsonPath("$[0].precioApertura").value(5_000))
+                .andExpect(jsonPath("$[0].variacion").value(250))
+                .andExpect(jsonPath("$[0].variacionPorcentaje").value(5.0));
         pedir(get("/api/instrumentos/NUEVO"), "BOT")
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.nombre").value("Nueva Empresa"));
+                .andExpect(jsonPath("$.nombre").value("Nueva Empresa"))
+                .andExpect(jsonPath("$.variacion").value(-500))
+                .andExpect(jsonPath("$.variacionPorcentaje").value(-10.0));
     }
 
     @Test

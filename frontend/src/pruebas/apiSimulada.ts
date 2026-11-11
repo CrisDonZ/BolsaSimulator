@@ -89,20 +89,34 @@ export function perfil(alias = 'ana_inversora') {
 }
 
 export const INSTRUMENTOS = [
-  instrumento('ANDX', 'Andes Energía', 'Energía', 5_000, 'ACTIVO'),
-  instrumento('CAFE', 'Café de Colombia', 'Consumo', 12_500, 'ACTIVO'),
+  // Hoy ANDX sube (abrió en 4.800), CAFE baja (abrió en 13.000) y TAYR no ha operado
+  instrumento('ANDX', 'Andes Energía', 'Energía', 5_000, 'ACTIVO', 4_800),
+  instrumento('CAFE', 'Café de Colombia', 'Consumo', 12_500, 'ACTIVO', 13_000),
   instrumento('TAYR', 'Tayrona Telecom', 'Telecomunicaciones', 3_200, 'SUSPENDIDO'),
 ];
 
-function instrumento(simbolo: string, nombre: string, sector: string, precio: number, estado: string) {
+/** Un instrumento como lo manda market-data-service, con la variación del día ya calculada con 2 decimales. */
+function instrumento(
+  simbolo: string,
+  nombre: string,
+  sector: string,
+  ultimoPrecio: number,
+  estado: string,
+  precioApertura = ultimoPrecio,
+) {
+  const variacion = ultimoPrecio - precioApertura;
   return {
     simbolo,
     nombre,
     sector,
-    precioInicial: precio,
+    precioInicial: 4_000,
     tick: 10,
     accionesEmitidas: 1_000_000,
     estado,
     creadoEn: '2026-10-01T00:00:00Z',
+    ultimoPrecio,
+    precioApertura,
+    variacion,
+    variacionPorcentaje: Math.round((variacion * 10_000) / precioApertura) / 100,
   };
 }

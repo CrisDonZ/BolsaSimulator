@@ -12,7 +12,7 @@
 
     <artifactId>market-data-service</artifactId>
     <name>market-data-service</name>
-    <description>Catálogo de instrumentos (por ahora); después, último precio y velas</description>
+    <description>Catálogo de instrumentos con su último precio y su variación del día; después, las velas</description>
 
     <dependencies>
         <dependency>

@@ -712,7 +712,7 @@ Las 23 historias de la versión 1 suman 86 puntos en 6 sprints; las 4 de la fase
 | 3 | HU-07 | Operar a precio de mercado | 5 | Hecho |
 | 3 | HU-08 | Cancelar una orden | 3 | Hecho |
 | 4 | HU-11 | Ver mi portafolio | 5 | Hecho, con pendientes (6) |
-| 4 | HU-14 | Ver la lista de instrumentos | 3 | En curso (5) |
+| 4 | HU-14 | Ver la lista de instrumentos | 3 | Hecho, con pendientes (5) |
 | 4 | HU-15 | Ver el gráfico de velas | 5 | Por hacer |
 | 4 | HU-16 | Ver el libro y las últimas operaciones | 5 | Por hacer |
 | 5 | HU-24 | Configurar bots de mercado | 8 | Por hacer |
@@ -729,11 +729,11 @@ Las 23 historias de la versión 1 suman 86 puntos en 6 sprints; las 4 de la fase
 | Fase 2 | HU-18 | Seguir instrumentos | 2 | Por hacer |
 | Fase 2 | HU-27 | Ver métricas del mercado | 3 | Por hacer |
 
-**Pendientes de las historias hechas** (estado al 5 de noviembre de 2026):
+**Pendientes de las historias hechas** (estado al 10 de noviembre de 2026):
 
 1. **HU-22:** las órdenes de un instrumento suspendido ya se pueden cancelar (HU-08). Las acciones emitidas de cada instrumento ya quedan en la cuenta del bot creador de mercado (RF-59), que auth-service crea al arrancar; los bots que operan solos llegan con HU-24.
 2. **HU-12:** el movimiento de reinicio llega con HU-25. Los de reserva, liberación, compra, venta y emisión ya llegan.
 3. **HU-09:** la actualización de la lista sin recargar la página llega con el WebSocket (sprint 4). Los estados, la cantidad ejecutada y el precio promedio ya se actualizan con `orders.events`, y el rechazo por saldo con `reservations.events`.
 4. **HU-05:** validar que el mercado esté abierto (RF-16) llega con HU-23; hasta entonces el mercado está siempre abierto. Una compra a mercado reserva cantidad × último precio × 1,10, y el motor la ejecuta solo dentro de ±10 % de ese mismo precio (RF-26, HU-07), así la reserva siempre alcanza. La liquidación usa `orders.events` y no `trades.executed`: ahí llegan, en orden y por la misma partición, las ejecuciones de cada orden y su cancelación.
-5. **HU-14:** la pantalla Mercado ya muestra los instrumentos con su precio inicial, su estado y un buscador por símbolo o nombre; HU-01 y HU-02 ya tienen sus pantallas. Faltan el último precio, la variación del día y la actualización en vivo por WebSocket.
+5. **HU-14:** la pantalla Mercado ya muestra cada instrumento con su símbolo, nombre, sector, último precio y variación del día (en COP y en %, con su signo), y un buscador por símbolo o nombre. market-data-service guarda cada operación de `trades.executed` en OPERACION con un listener de Kafka y calcula los precios en cada consulta de `GET /api/instrumentos`. El último precio es el de la última operación; sin operaciones, el precio inicial. La variación (RF-40) se mide contra el precio de apertura: el de la última operación anterior a las 00:00 de Colombia de ese día o, si no hay ninguna, el precio inicial; un instrumento que no ha operado hoy tiene variación 0. Cuando llegue HU-23, "el día" pasa a ser la sesión. Falta el criterio "el precio cambia sin recargar": llega con `marketdata.ticks` y el WebSocket (sprint 4), que también sirve a HU-09 y HU-11. Kafka Streams entra con las velas (HU-15).
 6. **HU-11:** `GET /api/portafolio` y la pantalla Portafolio ya muestran cada posición con cantidad, precio promedio, valor actual y ganancia o pérdida en COP y en % (RF-32), y el valor total (RF-33). El precio actual es el de la última operación, que portfolio-service copia de `trades.executed` en ULTIMO_PRECIO; sin operaciones, el precio inicial. Falta el criterio "el valor total se actualiza sin recargar": llega con el WebSocket (sprint 4); mientras tanto la pantalla tiene un botón Actualizar.

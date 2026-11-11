@@ -3,7 +3,7 @@ import { mensajeDe } from '../api/ErrorApi';
 import { listarInstrumentos } from '../api/instrumentos';
 import type { Instrumento } from '../api/tipos';
 import { Cargando } from '../comun/Cargando';
-import { formatoPesos } from '../comun/formato';
+import { formatoPesos, formatoPesosConSigno, formatoPorcentaje } from '../comun/formato';
 import { filtrarInstrumentos } from './filtrar';
 
 type Estado =
@@ -12,8 +12,8 @@ type Estado =
   | { tipo: 'listo'; instrumentos: Instrumento[] };
 
 /**
- * Mercado (inicio de HU-14): los instrumentos con su precio y un buscador. Por ahora el precio es el inicial; el último
- * precio, la variación del día y la actualización en vivo llegan con el resto de HU-14.
+ * Mercado (HU-14): los instrumentos con su último precio, su variación del día y un buscador. Los precios son los del
+ * momento en que se abre la página; la actualización en vivo llega con el WebSocket.
  */
 export default function PaginaMercado() {
   const [estado, setEstado] = useState<Estado>({ tipo: 'cargando' });
@@ -77,7 +77,8 @@ function TablaInstrumentos({ instrumentos }: { instrumentos: Instrumento[] }) {
     <div className="tabla-contenedor">
       <table className="tabla">
         <caption>
-          {instrumentos.length === 1 ? '1 instrumento' : `${instrumentos.length} instrumentos`}. Precios en COP.
+          {instrumentos.length === 1 ? '1 instrumento' : `${instrumentos.length} instrumentos`}. Precios en COP, con
+          su variación del día.
         </caption>
         <thead>
           <tr>
@@ -94,21 +95,37 @@ function TablaInstrumentos({ instrumentos }: { instrumentos: Instrumento[] }) {
         </thead>
         <tbody>
           {instrumentos.map((instrumento) => (
-            <tr key={instrumento.simbolo}>
-              <th scope="row">{instrumento.simbolo}</th>
-              <td>{instrumento.nombre}</td>
-              <td className="ocultable">{instrumento.sector}</td>
-              <td className="numero">{formatoPesos(instrumento.precioInicial)}</td>
-              <td>
-                {/* RNF-42: el estado se lee en el texto, no solo en el color */}
-                <span className={instrumento.estado === 'ACTIVO' ? 'etiqueta activo' : 'etiqueta suspendido'}>
-                  {instrumento.estado === 'ACTIVO' ? 'Activo' : 'Suspendido'}
-                </span>
-              </td>
-            </tr>
+            <FilaInstrumento key={instrumento.simbolo} instrumento={instrumento} />
           ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+function FilaInstrumento({ instrumento }: { instrumento: Instrumento }) {
+  // RNF-42: si subió o bajó se lee en el signo (+ o -), no solo en el color
+  const clase = instrumento.variacion > 0 ? 'ganancia' : instrumento.variacion < 0 ? 'perdida' : '';
+  return (
+    <tr>
+      <th scope="row">{instrumento.simbolo}</th>
+      <td>{instrumento.nombre}</td>
+      <td className="ocultable">{instrumento.sector}</td>
+      <td className="numero">
+        {formatoPesos(instrumento.ultimoPrecio)}
+        {/* Debajo del precio, en la misma celda: no agrega una columna y la tabla sigue cabiendo en 360 px (RNF-41).
+            En un celular queda solo el porcentaje; la variación en COP se esconde con el sector */}
+        <span className={`detalle ${clase}`}>
+          <span className="ocultable">{formatoPesosConSigno(instrumento.variacion)} · </span>
+          {formatoPorcentaje(instrumento.variacionPorcentaje)}
+        </span>
+      </td>
+      <td>
+        {/* RNF-42: el estado se lee en el texto, no solo en el color */}
+        <span className={instrumento.estado === 'ACTIVO' ? 'etiqueta activo' : 'etiqueta suspendido'}>
+          {instrumento.estado === 'ACTIVO' ? 'Activo' : 'Suspendido'}
+        </span>
+      </td>
+    </tr>
   );
 }

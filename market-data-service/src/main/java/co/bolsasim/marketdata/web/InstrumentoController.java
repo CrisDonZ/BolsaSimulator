@@ -15,7 +15,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Catálogo de instrumentos. Consultarlo pide un token; crear, editar, suspender y reactivar piden además
+ * Catálogo de instrumentos, cada uno con su último precio y su variación del día (HU-14). Consultarlo pide un token; crear, editar, suspender y reactivar piden además
  * el rol ADMIN (ver ConfiguracionSeguridad). No hay borrado: las acciones de un instrumento existen
  * mientras exista el mercado (RNF-08).
  */
@@ -44,22 +44,27 @@ public class InstrumentoController {
     public ResponseEntity<InstrumentoResponse> crear(@Valid @RequestBody CrearInstrumentoRequest request) {
         Instrumento instrumento = servicio.crear(request);
         return ResponseEntity.created(URI.create("/api/instrumentos/" + instrumento.getSimbolo()))
-                .body(InstrumentoResponse.de(instrumento));
+                .body(conPrecios(instrumento));
     }
 
     @PutMapping("/{simbolo}")
     public InstrumentoResponse editar(@PathVariable String simbolo, @Valid @RequestBody EditarInstrumentoRequest request) {
-        return InstrumentoResponse.de(servicio.editar(simbolo, request));
+        return conPrecios(servicio.editar(simbolo, request));
     }
 
     /** Rechaza órdenes nuevas desde ya; las que están en el libro se conservan (RF-29). */
     @PostMapping("/{simbolo}/suspender")
     public InstrumentoResponse suspender(@PathVariable String simbolo) {
-        return InstrumentoResponse.de(servicio.suspender(simbolo));
+        return conPrecios(servicio.suspender(simbolo));
     }
 
     @PostMapping("/{simbolo}/reactivar")
     public InstrumentoResponse reactivar(@PathVariable String simbolo) {
-        return InstrumentoResponse.de(servicio.reactivar(simbolo));
+        return conPrecios(servicio.reactivar(simbolo));
+    }
+
+    /** El instrumento recién cambiado, ya confirmado en la base, con sus precios del día como en las consultas. */
+    private InstrumentoResponse conPrecios(Instrumento instrumento) {
+        return InstrumentoResponse.de(servicio.buscar(instrumento.getSimbolo()));
     }
 }

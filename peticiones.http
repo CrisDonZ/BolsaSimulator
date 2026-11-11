@@ -209,7 +209,9 @@ Content-Type: application/json
   "contrasena": "LA-DE-BOLSASIM_ADMIN_CONTRASENA"
 }
 
-### 18. Catálogo de instrumentos (cualquier usuario con token) -> 200 con los 10 iniciales y su estado
+### 18. Catálogo de instrumentos (cualquier usuario con token) -> 200 con los 10 iniciales y su estado. Cada uno trae
+###     su último precio y su variación del día (HU-14): ultimoPrecio, precioApertura, variacion y variacionPorcentaje.
+###     Sin operaciones, el último precio es el inicial y la variación es 0.
 GET {{gateway}}/api/instrumentos
 Authorization: Bearer {{token}}
 
@@ -471,4 +473,10 @@ Content-Type: application/json
 ###     sin operaciones, el inicial), valor actual y ganancia o pérdida en COP y en %; y el valor total = saldo total
 ###     + valor de las acciones. Después de la 43 verás ANDX. Un ADMIN recibe 404.
 GET {{gateway}}/api/portafolio
+Authorization: Bearer {{token}}
+
+### 46. El último precio y la variación del día de un instrumento (HU-14). Después de cruzar la 6 con la 33 (o de la 43),
+###     ANDX trae ultimoPrecio = el precio de esa operación y variacion = ultimoPrecio - precioApertura, con su signo.
+###     precioApertura es el último precio antes de las 00:00 de Colombia de hoy; sin operaciones anteriores, el inicial.
+GET {{gateway}}/api/instrumentos/ANDX
 Authorization: Bearer {{token}}

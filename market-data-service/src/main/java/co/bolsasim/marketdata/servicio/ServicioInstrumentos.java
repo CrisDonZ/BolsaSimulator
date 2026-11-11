@@ -2,9 +2,12 @@ package co.bolsasim.marketdata.servicio;
 
 import co.bolsasim.marketdata.instrumento.Instrumento;
 import co.bolsasim.marketdata.instrumento.RepositorioInstrumentos;
+import co.bolsasim.marketdata.operacion.Cotizacion;
+import co.bolsasim.marketdata.operacion.RepositorioOperaciones;
 import co.bolsasim.marketdata.web.CrearInstrumentoRequest;
 import co.bolsasim.marketdata.web.EditarInstrumentoRequest;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Locale;
@@ -16,16 +19,28 @@ import org.springframework.transaction.annotation.Transactional;
  * Reglas del catálogo (HU-22, RF-54): crear, editar, suspender y reactivar instrumentos. Cada cambio se
  * publica en instruments.events para que order-service (y después el motor y los bots) se enteren sin
  * reiniciar nada (RNF-20). Quién puede hacer cada cosa lo decide la cadena de seguridad, no este servicio.
+ *
+ * <p>Las consultas devuelven cada instrumento con su último precio y su variación del día (HU-14, RF-11, RF-40),
+ * calculados en cada consulta a partir de OPERACION.
  */
 @Service
 public class ServicioInstrumentos {
 
+    /**
+     * "El día" de la variación es el día calendario en Colombia. Cuando el mercado abra y cierre (HU-23) pasa a
+     * ser la sesión: la apertura será el precio con el que cerró la sesión anterior.
+     */
+    static final ZoneId ZONA = ZoneId.of("America/Bogota");
+
     private final RepositorioInstrumentos repositorio;
     private final PublicadorInstrumentos publicador;
+    private final RepositorioOperaciones operaciones;
 
-    public ServicioInstrumentos(RepositorioInstrumentos repositorio, PublicadorInstrumentos publicador) {
+    public ServicioInstrumentos(RepositorioInstrumentos repositorio, PublicadorInstrumentos publicador,
+                                RepositorioOperaciones operaciones) {
         this.repositorio = repositorio;
         this.publicador = publicador;
+        this.operaciones = operaciones;
     }
 
     @Transactional
@@ -64,14 +79,20 @@ public class ServicioInstrumentos {
     }
 
     @Transactional(readOnly = true)
-    public List<Instrumento> listar() {
-        return repositorio.findAllByOrderBySimboloAsc();
+    public List<Cotizacion> listar() {
+        return operaciones.cotizaciones(inicioDelDia(Instant.now()));
     }
 
     @Transactional(readOnly = true)
-    public Instrumento buscar(String simbolo) {
+    public Cotizacion buscar(String simbolo) {
         String normalizado = normalizar(simbolo);
-        return repositorio.findById(normalizado).orElseThrow(() -> new InstrumentoNoEncontradoException(normalizado));
+        return operaciones.cotizacion(normalizado, inicioDelDia(Instant.now()))
+                .orElseThrow(() -> new InstrumentoNoEncontradoException(normalizado));
+    }
+
+    /** Las 00:00 en Colombia del día al que pertenece ese momento. */
+    static Instant inicioDelDia(Instant momento) {
+        return momento.atZone(ZONA).toLocalDate().atStartOfDay(ZONA).toInstant();
     }
 
     /** Bloquea el instrumento, aplica el cambio y, solo si algo cambió, avisa a los demás servicios. */

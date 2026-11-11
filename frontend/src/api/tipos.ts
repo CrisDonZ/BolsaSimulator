@@ -43,7 +43,10 @@ export interface TokenAccesoRespuesta {
 
 export type EstadoInstrumento = 'ACTIVO' | 'SUSPENDIDO';
 
-/** market-data-service: InstrumentoResponse. El último precio y la variación del día llegan con HU-14. */
+/**
+ * market-data-service: InstrumentoResponse. Precios en COP enteros. La variación del día es ultimoPrecio menos
+ * precioApertura (el último precio antes de empezar el día); variacionPorcentaje ya viene multiplicado por 100.
+ */
 export interface Instrumento {
   simbolo: string;
   nombre: string;
@@ -53,6 +56,10 @@ export interface Instrumento {
   accionesEmitidas: number;
   estado: EstadoInstrumento;
   creadoEn: string;
+  ultimoPrecio: number;
+  precioApertura: number;
+  variacion: number;
+  variacionPorcentaje: number;
 }
 
 /** Problem Details (RFC 9457), el formato de error de todos los servicios. */
